@@ -101,9 +101,9 @@ actor AttachedCounter {
 
 // MARK: - Generic attach path (deterministic)
 
-@Test func attachPublishesHandshakenExecutor() async {
+@Test func attachPublishesHandshakenExecutor() async throws {
   let dispatcher = TestPumpDispatcher()
-  let executor = await AttachedThreadExecutor.attach(to: dispatcher)
+  let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
 
   // handshake completed: threadID valid and different from the caller's.
   #expect(executor.threadID != ThreadID.current)
@@ -112,9 +112,9 @@ actor AttachedCounter {
   dispatcher.stopAndJoin()
 }
 
-@Test func attachedJobsRunOnDispatcherThread() async {
+@Test func attachedJobsRunOnDispatcherThread() async throws {
   let dispatcher = TestPumpDispatcher()
-  let executor = await AttachedThreadExecutor.attach(to: dispatcher)
+  let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
 
   let tids = await withTaskExecutorPreference(executor) {
     await withTaskGroup(of: ThreadID.self) { group in
@@ -135,18 +135,18 @@ actor AttachedCounter {
   dispatcher.stopAndJoin()
 }
 
-@Test func twoAttachmentsShareTheFixedThread() async {
+@Test func twoAttachmentsShareTheFixedThread() async throws {
   let dispatcher = TestPumpDispatcher()
-  let first = await AttachedThreadExecutor.attach(to: dispatcher)
-  let second = await AttachedThreadExecutor.attach(to: dispatcher)
+  let first = try await AttachedThreadExecutor.attach(to: dispatcher)
+  let second = try await AttachedThreadExecutor.attach(to: dispatcher)
   #expect(first.threadID == second.threadID)
 
   dispatcher.stopAndJoin()
 }
 
-@Test func actorBindsToAttachedExecutor() async {
+@Test func actorBindsToAttachedExecutor() async throws {
   let dispatcher = TestPumpDispatcher()
-  let executor = await AttachedThreadExecutor.attach(to: dispatcher)
+  let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
   let counter = AttachedCounter(executor: executor)
 
   #expect(await counter.next() == 1)
@@ -157,31 +157,62 @@ actor AttachedCounter {
 
 // MARK: - Main queue path (environment-conditional)
 
-@Test func mainThreadExecutorWhenMainQueueIsServiced() async throws {
-  guard probeMainQueuePumped(timeout: 1.0) else {
-    return
-  }
-
-  let executor = await MainThreadExecutor.shared
-  let tid = await withTaskExecutorPreference(executor) {
-    ThreadID.current
-  }
-  #expect(tid == executor.threadID)
-  #expect(tid != ThreadID.current)
-
-  // Singleton identity.
-  let again = await MainThreadExecutor.shared
-  #expect(again === executor)
-}
-
 @Test func mainQueueDispatcherIsAValidFixedThreadDispatcher() async throws {
   guard probeMainQueuePumped(timeout: 1.0) else {
     return
   }
 
-  let executor = await AttachedThreadExecutor.attach(to: MainQueueDispatcher())
+  let executor = try await AttachedThreadExecutor.attach(to: MainQueueDispatcher())
   let positive = await withTaskExecutorPreference(executor) {
     executor.isIsolatingCurrentContext()
   }
   #expect(positive == true)
+}
+
+private struct AttachInitializationFailed: Error {}
+
+/// Posted `initialize` runs exactly once on the target thread, before any
+/// job submitted to the attached executor.
+@Test func attachInitializeRunsOnTargetThreadBeforeJobs() async throws {
+  let dispatcher = TestPumpDispatcher()
+  let initializerThreads = TestBox<[ThreadID]>([])
+  let executor = try await AttachedThreadExecutor.attach(
+    to: dispatcher,
+    initialize: { initializerThreads.with { $0.append(ThreadID.current) } }
+  )
+  #expect(initializerThreads.get().count == 1)
+
+  let jobThread = await withTaskExecutorPreference(executor) { ThreadID.current }
+  #expect(jobThread == initializerThreads.get().first)
+  #expect(jobThread == executor.threadID)
+
+  dispatcher.stopAndJoin()
+}
+
+/// A posted `initialize` error fails the attach; no executor is published.
+@Test func attachInitializeFailureFailsAttach() async throws {
+  let dispatcher = TestPumpDispatcher()
+  await #expect(throws: AttachInitializationFailed.self) {
+    _ = try await AttachedThreadExecutor.attach(
+      to: dispatcher,
+      initialize: { throw AttachInitializationFailed() }
+    )
+  }
+  dispatcher.stopAndJoin()
+}
+
+/// A failed attach leaves the dispatcher reusable: a retry on the same
+/// dispatcher succeeds with a fresh handshake state.
+@Test func attachRetryAfterInitializeFailureSucceedsOnSameDispatcher() async throws {
+  let dispatcher = TestPumpDispatcher()
+  await #expect(throws: AttachInitializationFailed.self) {
+    _ = try await AttachedThreadExecutor.attach(
+      to: dispatcher,
+      initialize: { throw AttachInitializationFailed() }
+    )
+  }
+
+  let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
+  #expect(executor.threadID != ThreadID.current)
+  dispatcher.stopAndJoin()
 }

@@ -14,14 +14,23 @@ import Foundation
 ///
 /// The executor subclasses `Thread` directly. Jobs travel through the
 /// generic blocking queue from the `BlockingQueue` library; a one-shot
-/// handshake carries the worker's `ThreadID` from the bound thread to the
-/// constructor.
+/// handshake carries the worker's `ThreadID` and the outcome of the
+/// on-thread `initialize` closure from the bound thread to the constructor.
 ///
 /// Lifecycle:
 ///
-/// - `init` starts the worker thread and only returns once the worker has
-///   published its `ThreadID` — the instance accepts jobs the moment
-///   construction completes.
+/// - `initialize` runs exactly once on the bound thread, before the first
+///   job — for thread-local state, thread-affine native runtimes and other
+///   create-thread-equals-use-thread requirements. An error it throws is
+///   rethrown by `init`: the failed executor is never published and the
+///   worker thread exits. Cleanup after a failed `initialize` is the
+///   closure's own responsibility (e.g. `defer`).
+/// - `finalize` runs on the bound thread after the queue drained, before
+///   the thread exits — only on the success path; it is skipped when
+///   `initialize` failed. `shutdown()` returns only after `finalize`
+///   completed.
+/// - `init` returns only after `initialize` succeeded — the instance
+///   accepts jobs the moment construction completes.
 /// - The running `Thread` is retained by Foundation until `main()` returns,
 ///   so the executor cannot deallocate underneath an accepted-but-unrun job.
 /// - `shutdown()` requires the quiescence contract: no actor, task or
@@ -39,45 +48,70 @@ public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchec
   private let consumer: QueueConsumer<UnownedJob>
   private let supervisor: QueueSupervisor<UnownedJob>
   private let handshake = StartupHandshake()
+  private let exitLatch = ExitLatch()
+  private let initialize: @Sendable () throws -> Void
+  private let finalize: @Sendable () -> Void
 
-  /// Creates the worker thread and waits for its startup handshake.
+  /// Creates the worker thread, runs `initialize` on it and waits for the
+  /// startup handshake.
   ///
-  /// - Parameter name: Best-effort OS thread name; diagnostic only.
+  /// - Parameters:
+  ///   - name: Best-effort OS thread name; diagnostic only.
+  ///   - initialize: Runs once on the bound thread before the first job;
+  ///     an error it throws fails construction and the worker exits.
+  ///   - finalize: Runs once on the bound thread after the queue drained,
+  ///     before the thread exits; never runs when `initialize` failed.
   ///
   /// `Foundation.Thread.start()` has no failure return, so a thread that
   /// cannot be spawned (resource exhaustion) blocks this initializer —
   /// accepted in exchange for not re-implementing thread management.
-  public init(name: String? = nil) {
+  public init(
+    name: String? = nil,
+    initialize: @escaping @Sendable () throws -> Void = {},
+    finalize: @escaping @Sendable () -> Void = {}
+  ) throws {
     let ends = Queue<UnownedJob>().split()
     self.producer = ends.producer.share()
     self.consumer = ends.consumer
     self.supervisor = ends.supervisor
+    self.initialize = initialize
+    self.finalize = finalize
     super.init()
     if let name {
       self.name = name
     }
     self.start()
-    // Ready ⇒ the worker published its ThreadID and accepts jobs.
-    _ = handshake.waitUntilPublished()
+    // Ready ⇒ the worker initialized and published its ThreadID.
+    try handshake.awaitReady()
   }
 
-  /// The worker's service loop: blocks on the queue and executes one job
-  /// per wake-up until the queue is closed and fully drained.
+  /// The worker's service loop: initializes, then blocks on the queue and
+  /// executes one job per wake-up until the queue is closed and fully
+  /// drained; `finalize` is the last code to run on the thread.
   public override func main() {
-    handshake.publish(ThreadID.current)
+    let threadID = ThreadID.current
+    do {
+      try initialize()
+      handshake.publishSuccess(threadID)
+    } catch {
+      handshake.publishFailure(error)
+      return
+    }
 
     while let job = consumer.take() {
       runJob(job)
     }
+    finalize()
+    exitLatch.signal()
   }
 
   public func enqueue(_ job: consuming ExecutorJob) {
     producer.enqueue(UnownedJob(job))
   }
 
-  /// Requests shutdown and blocks until the queue drained and sealed
-  /// (the worker's service loop is exiting). Jobs arriving after this
-  /// request are dropped.
+  /// Requests shutdown and blocks until the queue drained, the worker ran
+  /// `finalize` and its exit epilogue completed (the thread is exiting).
+  /// Jobs arriving after this request are dropped.
   ///
   /// - Precondition: called off the bound thread with the quiescence
   ///   contract satisfied (canceling tasks does not by itself guarantee
@@ -89,6 +123,7 @@ public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchec
     )
     supervisor.close()
     supervisor.waitUntilSealed()
+    exitLatch.wait()
   }
 
   /// Whether the queue sealed, i.e. the worker observed drain-and-close

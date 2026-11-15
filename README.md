@@ -9,10 +9,9 @@ Thread-affinity executors for Swift Concurrency: every job accepted by one of th
 | `BlockingQueue` (separate library product) | Split-endpoint blocking FIFO queues: a linear queue token (`Queue` unbounded / `BoundedQueue` fixed capacity) is consumed by `split()` into producer and consumer ends plus a non-minting supervisor; ends come in move-only unique (`~Copyable`) and cloneable shared (`Sendable`) tiers; enqueue is a `Bool`-returning try, bounded producers add `enqueueBlocking`; ends auto-disconnect on release (last producer closes, last consumer seals); elements need not be `Sendable` — ownership transfers through the queue, enforced by the compiler's `sending` handoff on enqueue (build-time SIL check) | ✅ |
 | `ThreadID` | Cross-platform OS thread ID value type (Darwin `pthread_threadid_np` / Linux `gettid` / Windows `GetCurrentThreadId`); `Foundation.Thread` exposes no unified numeric TID | ✅ |
 | `ThreadBoundExecutor` | `SerialExecutor + TaskExecutor` protocol; `isIsolatingCurrentContext()` (Swift 6.2) with a `checkIsolated()` fallback | ✅ |
-| `DedicatedThreadExecutor` | Subclasses `Foundation.Thread` directly; synchronous `init(name:)` completes the startup handshake; jobs travel through the `BlockingQueue` library; the worker's `ThreadID` is published through a one-shot handshake | ✅ |
-| `CurrentThreadLoopExecutor` | `installOnCurrentThread()` captures the TID; `run()` synchronously occupies the calling thread until `stop()` and a drained queue | ✅ |
-| `MainThreadExecutor` / `MainQueueDispatcher` | Main-thread attachment via `DispatchQueue.main`; requires a main queue that is actually serviced | ✅ |
-| `AttachedThreadExecutor` + `FixedThreadDispatcher` | Generic attachment to any fixed thread exposing a `post` entry (third-party event loops, RunLoop hosts) | ✅ interface ready, real backends pending |
+| `DedicatedThreadExecutor` | Subclasses `Foundation.Thread` directly; `init(name:initialize:finalize:)` runs `initialize` once on the worker thread before the first job (errors rethrown, executor never published) and `finalize` after drain; jobs travel through the `BlockingQueue` library | ✅ |
+| `AttachedThreadExecutor` + `FixedThreadDispatcher` | Attaches to any fixed thread exposing a `post` entry (`MainQueueDispatcher` for the main queue, RunLoop hosts, third-party event loops) via a posted handshake that runs caller `initialize` on the target thread before any job (failures throw); `attachOnCurrentThread(to:initialize:)` self-attaches synchronously to caller-driven pumps | ✅ |
+| `QueueDispatcher` | Library-provided pump for threads without an event loop (program main threads, host entry threads): `post` queues, `run()` occupies the calling thread until `stop()` and a drained queue, then runs the constructor's `finalize` once — pair with `attachOnCurrentThread(to:)` | ✅ |
 | Shutdown scopes / task tracking | Full quiescence machinery | ⏳ explicit quiescence contract for now |
 
 ## Contract
@@ -21,7 +20,7 @@ Thread-affinity executors for Swift Concurrency: every job accepted by one of th
 - `enqueue` is safe from any thread; jobs never overlap and run exactly once.
 - While jobs may still arrive, the executor and its scheduling backend stay alive.
 
-> **Quiescence contract**: before `shutdown()`, no actor, task or external producer may submit further jobs. Queued jobs drain before the thread exits; once production is closed — from the `stop()` / `shutdown()` request onward — enqueueing drops the job and the producer end's `enqueue` returns `false`. Borrowed threads (main thread / attached backends) are not stopped by the library and expose no shutdown.
+> **Quiescence contract**: before `shutdown()`, no actor, task or external producer may submit further jobs. Queued jobs drain before the thread exits; once production is closed — from the `stop()` / `shutdown()` request onward — enqueueing drops the job and the producer end's `enqueue` returns `false`. Borrowed threads (main thread / attached backends) are not stopped by the library and expose no shutdown; caller-driven pumps stop through `QueueDispatcher.stop()` with the same drain-then-exit semantics.
 
 ## Quick start
 
@@ -30,7 +29,9 @@ Thread-affinity executors for Swift Concurrency: every job accepted by one of th
 ```swift
 import ThreadAffinityExecutor
 
-let executor = DedicatedThreadExecutor(name: "worker")
+// initialize runs once on the worker thread before the first job; finalize after drain.
+// Both are optional; an initialize error fails construction.
+let executor = try DedicatedThreadExecutor(name: "worker")
 
 actor Counter {
     nonisolated let executor: DedicatedThreadExecutor
@@ -72,24 +73,26 @@ counter.assumeIsolated { site in
 }
 ```
 
-### Caller-driven loop
+### Caller-driven pump (self-attach)
 
 ```swift
-let executor = CurrentThreadLoopExecutor.installOnCurrentThread()
+let pump = QueueDispatcher()
+let executor = try AttachedThreadExecutor.attachOnCurrentThread(to: pump)
 
-// keep a strong reference until run() returned — queued jobs do not retain the executor.
-// after submitting work, occupy the calling thread until stop() and a drained queue:
-executor.run()
+// queued work retains the executor: always enter run() and let it return —
+// abandoning a pump with undrained work leaks it and never runs that work.
+// after submitting work, occupy the calling thread until pump.stop() and a drained queue:
+pump.run()
 ```
 
 ### Main thread / attached threads
 
 ```swift
 // main thread (requires a serviced main queue, e.g. a GUI run loop or dispatchMain()):
-let mainExecutor = await MainThreadExecutor.shared
+let mainExecutor = try await AttachedThreadExecutor.attach(to: MainQueueDispatcher())
 
 // any fixed-thread loop that provides a post entry:
-let executor = await AttachedThreadExecutor.attach(to: myEventLoopDispatcher)
+let executor = try await AttachedThreadExecutor.attach(to: myEventLoopDispatcher)
 ```
 
 ## Build / test
@@ -105,5 +108,5 @@ Requires a Swift 6.2+ toolchain. Deployment floors: macOS 15 / iOS 18 / tvOS 18 
 
 - `ThreadID.rawValue` is not public; kernels recycle TIDs, so no historical identity is provided for dead threads.
 - `Foundation.Thread.start()` has no failure return; if the thread cannot be spawned (resource exhaustion) the synchronous initializer blocks.
-- The main-thread executor shares the thread with `MainActor` but is not the same executor identity and does not replace it.
+- An executor attached to the main thread via `MainQueueDispatcher` shares the thread with `MainActor` but is not the same executor identity and does not replace it.
 - On older libc without an importable `gettid`, a thin shim for this one call is all that is missing.

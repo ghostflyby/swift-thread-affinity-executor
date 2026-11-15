@@ -21,8 +21,10 @@
 /// 5. **Synchronous isolation correctness** — any synchronous call observing
 ///    `isIsolatingCurrentContext() == true` is properly ordered with the
 ///    executor's jobs; adapters must audit nested-loop re-entrancy.
-/// 6. **Complete execution** — every accepted job runs exactly once; jobs are
-///    never dropped, duplicated or silently discarded.
+/// 6. **Complete execution** — every job enqueued while the executor is within
+///    its effective lifetime runs exactly once; jobs are never duplicated or
+///    silently discarded. The documented stop/shutdown drop window — jobs
+///    arriving after the close request — is the sole exception.
 /// 7. **Lifetime validity** — while tasks or actors may still submit jobs,
 ///    the bound thread and the scheduling channel remain usable.
 public protocol ThreadBoundExecutor: SerialExecutor, TaskExecutor {

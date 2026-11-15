@@ -50,7 +50,7 @@ actor Counter {
 /// A custom `unownedExecutor` drives actor methods
 /// on the dedicated thread.
 @Test func actorRunsOnBoundThread() async throws {
-  let counter = Counter(executor: DedicatedThreadExecutor(name: "tae-actor"))
+  let counter = Counter(executor: try DedicatedThreadExecutor(name: "tae-actor"))
 
   #expect(await counter.boundThreadHolds())
   #expect(await counter.next() == 1)
@@ -62,7 +62,7 @@ actor Counter {
 /// After suspension and resumption the actor
 /// isolation still lands on the bound thread.
 @Test func actorIsolationSurvivesSuspension() async throws {
-  let counter = Counter(executor: DedicatedThreadExecutor(name: "tae-actor-hop"))
+  let counter = Counter(executor: try DedicatedThreadExecutor(name: "tae-actor-hop"))
 
   #expect(await counter.hopAwayAndComeBack())
 
@@ -97,7 +97,7 @@ actor Sibling {
 /// from the bound thread is accepted via dynamic isolation checking — even
 /// across different actor objects sharing the thread.
 @Test func assumeIsolatedSucceedsOnBoundThread() async throws {
-  let counter = Counter(executor: DedicatedThreadExecutor(name: "tae-assume"))
+  let counter = Counter(executor: try DedicatedThreadExecutor(name: "tae-assume"))
   let sibling = Sibling(executor: counter.executor, counter: counter)
 
   let result = await sibling.syncAccessCounter()
@@ -111,7 +111,7 @@ actor Sibling {
 /// (Its off-thread failure mode is a `precondition` trap, which cannot be
 /// asserted in-process.)
 @Test func checkIsolatedFallbackPassesOnBoundThread() async throws {
-  let executor = DedicatedThreadExecutor(name: "tae-checkfallback")
+  let executor = try DedicatedThreadExecutor(name: "tae-checkfallback")
 
   let passed = await withTaskExecutorPreference(executor) {
     executor.checkIsolated()

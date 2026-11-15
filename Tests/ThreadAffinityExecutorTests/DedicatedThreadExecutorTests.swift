@@ -10,31 +10,85 @@ import Testing
 
 // MARK: - Startup / shutdown
 
-@Test func initPublishesRunningExecutor() {
-  let executor = DedicatedThreadExecutor(name: "tae-basic")
+@Test func initPublishesRunningExecutor() throws {
+  let executor = try DedicatedThreadExecutor(name: "tae-basic")
   #expect(!executor.hasFinished)
   #expect(executor.threadID != ThreadID.current)
   executor.shutdown()
   #expect(executor.hasFinished)
 }
 
-@Test func shutdownIsIdempotent() {
-  let executor = DedicatedThreadExecutor(name: "tae-idempotent")
+@Test func shutdownIsIdempotent() throws {
+  let executor = try DedicatedThreadExecutor(name: "tae-idempotent")
   executor.shutdown()
   executor.shutdown()
   #expect(executor.hasFinished)
 }
 
-@Test func concurrentInitsAreSafe() async {
-  await withTaskGroup(of: Void.self) { group in
+@Test func concurrentInitsAreSafe() async throws {
+  try await withThrowingTaskGroup(of: Void.self) { group in
     for index in 0..<8 {
       group.addTask {
-        let executor = DedicatedThreadExecutor(name: "tae-concurrent-\(index)")
+        let executor = try DedicatedThreadExecutor(name: "tae-concurrent-\(index)")
         #expect(executor.threadID != ThreadID.current)
         executor.shutdown()
       }
     }
+    try await group.waitForAll()
   }
+}
+
+// MARK: - Initialization model
+
+/// `initialize` runs exactly once on the bound thread, before any job.
+@Test func initializeRunsOnceBeforeFirstJobOnBoundThread() async throws {
+  let initializerThreads = TestBox<[ThreadID]>([])
+  let executor = try DedicatedThreadExecutor(name: "tae-init") {
+    initializerThreads.with { $0.append(ThreadID.current) }
+  }
+  #expect(initializerThreads.get().count == 1)
+
+  let jobThread = await withTaskExecutorPreference(executor) {
+    ThreadID.current
+  }
+  #expect(jobThread == initializerThreads.get().first)
+  #expect(jobThread == executor.threadID)
+  executor.shutdown()
+}
+
+private struct InitializationFailed: Error {}
+
+/// An `initialize` error fails construction: rethrown to the caller, no
+/// executor published, `finalize` never runs.
+@Test func initializationFailurePropagatesAndSkipsFinalize() throws {
+  let finalized = TestBox(false)
+  #expect(throws: InitializationFailed.self) {
+    _ = try DedicatedThreadExecutor(
+      name: "tae-init-fail",
+      initialize: { throw InitializationFailed() },
+      finalize: { finalized.set(true) }
+    )
+  }
+  #expect(finalized.get() == false)
+}
+
+/// `finalize` runs on the bound thread after the queue drained.
+@Test func finalizeRunsAfterDrainOnBoundThread() async throws {
+  let jobThread = TestBox<ThreadID?>(nil)
+  let finalThread = TestBox<ThreadID?>(nil)
+  let executor = try DedicatedThreadExecutor(name: "tae-finalize") {
+  } finalize: {
+    finalThread.set(ThreadID.current)
+  }
+
+  await withTaskExecutorPreference(executor) {
+    jobThread.set(ThreadID.current)
+  }
+
+  // shutdown() joins the exit epilogue: finalize has completed here.
+  executor.shutdown()
+  #expect(finalThread.get() == jobThread.get())
+  #expect(finalThread.get() == executor.threadID)
 }
 
 // MARK: - Thread binding
@@ -42,7 +96,7 @@ import Testing
 /// Many consecutive jobs always read the same TID,
 /// which is the executor's published one.
 @Test func jobsRunOnBoundThread() async throws {
-  let executor = DedicatedThreadExecutor(name: "tae-binding")
+  let executor = try DedicatedThreadExecutor(name: "tae-binding")
 
   let observed: [ThreadID] = try await withTaskExecutorPreference(executor) {
     try await withThrowingTaskGroup(of: ThreadID.self) { group in
@@ -65,7 +119,7 @@ import Testing
 /// Concurrent submitters, exactly-once
 /// execution, no data race in shared state, all on a single OS thread.
 @Test func jobExecutionIsExactlyOnceUnderConcurrency() async throws {
-  let executor = DedicatedThreadExecutor(name: "tae-serial")
+  let executor = try DedicatedThreadExecutor(name: "tae-serial")
   let counter = ThreadSafeCounter()
   let threadsSeen = TestBox<Set<ThreadID>>([])
 
@@ -90,8 +144,8 @@ import Testing
 // MARK: - Isolation checks
 
 /// Off the bound thread the check is negative.
-@Test func isolationCheckIsNegativeOffBoundThread() {
-  let executor = DedicatedThreadExecutor(name: "tae-negative")
+@Test func isolationCheckIsNegativeOffBoundThread() throws {
+  let executor = try DedicatedThreadExecutor(name: "tae-negative")
   #expect(executor.isIsolatingCurrentContext() == false)
   executor.shutdown()
 }
@@ -99,7 +153,7 @@ import Testing
 /// On the bound thread the check is
 /// positive and thread-based (not executor-identity based).
 @Test func isolationCheckIsPositiveOnBoundThread() async throws {
-  let executor = DedicatedThreadExecutor(name: "tae-positive")
+  let executor = try DedicatedThreadExecutor(name: "tae-positive")
 
   let positive = await withTaskExecutorPreference(executor) {
     executor.isIsolatingCurrentContext()
@@ -112,7 +166,7 @@ import Testing
 /// Jobs accepted before shutdown all execute; the
 /// thread finishes and `shutdown` returns.
 @Test func shutdownDrainsAcceptedJobs() async throws {
-  let executor = DedicatedThreadExecutor(name: "tae-drain")
+  let executor = try DedicatedThreadExecutor(name: "tae-drain")
   let counter = ThreadSafeCounter()
 
   await withTaskExecutorPreference(executor) {
