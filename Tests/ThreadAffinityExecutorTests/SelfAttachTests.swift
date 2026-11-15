@@ -182,3 +182,30 @@ private struct SelfAttachInitializationFailed: Error {}
 
   #expect(observed.get() == [1])
 }
+
+/// Self-attached executor: `detach()` from another thread posts finalize
+/// through the pump; FIFO runs it after all accepted work on the owner
+/// thread, and `run()` drains it before returning.
+@Test func selfAttachedDetachRunsFinalizeThroughPump() throws {
+  let dispatcher = QueueDispatcher()
+  let finalThreads = TestBox<[ThreadID]>([])
+  let executor = try AttachedThreadExecutor.attachOnCurrentThread(
+    to: dispatcher,
+    finalize: {
+      finalThreads.with { $0.append(ThreadID.current) }
+      dispatcher.stop()  // the test pump's exit
+    }
+  )
+
+  let detached = DispatchSemaphore(value: 0)
+  let stopper = Thread {
+    executor.detach()
+    detached.signal()
+  }
+  stopper.start()
+
+  dispatcher.run()
+  detached.wait()
+
+  #expect(finalThreads.get() == [ThreadID.current])
+}

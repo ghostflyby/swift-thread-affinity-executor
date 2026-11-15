@@ -216,3 +216,108 @@ private struct AttachInitializationFailed: Error {}
   #expect(executor.threadID != ThreadID.current)
   dispatcher.stopAndJoin()
 }
+
+/// Synchronous helper — `DispatchSemaphore.wait` is unavailable from async
+/// contexts; the block is bounded (the pump services the signal).
+private func waitForSignal(_ semaphore: DispatchSemaphore) {
+  semaphore.wait()
+}
+
+/// `detach()` posts `finalize` after all accepted work, on the bound
+/// thread, and joins: it returns only after finalize completed. The job is
+/// mid-flight when detach posts — FIFO must still run it first. Idempotent.
+@Test func detachRunsFinalizeAfterAllWorkAndJoins() async throws {
+  let dispatcher = TestPumpDispatcher()
+  let order = TestBox<[String]>([])
+  let finalThreads = TestBox<[ThreadID]>([])
+  let executor = try await AttachedThreadExecutor.attach(
+    to: dispatcher,
+    finalize: {
+      order.with { $0.append("finalize") }
+      finalThreads.with { $0.append(ThreadID.current) }
+    }
+  )
+
+  let delivered = DispatchSemaphore(value: 0)
+  let job = Task {
+    await withTaskExecutorPreference(executor) {
+      order.with { $0.append("job") }
+      delivered.signal()
+    }
+  }
+  waitForSignal(delivered)  // the job is executing: its post already precedes the finalize post
+
+  executor.detach()
+  executor.detach()  // idempotent: finalize ran once, both calls returned
+
+  await job.value
+
+  #expect(order.get() == ["job", "finalize"])
+  #expect(finalThreads.get().count == 1)
+  #expect(finalThreads.get().first == executor.threadID)
+
+  dispatcher.stopAndJoin()
+}
+
+/// Jobs submitted after `detach()` fall into the drop window.
+@Test func jobsEnqueuedAfterDetachAreDropped() async throws {
+  let dispatcher = TestPumpDispatcher()
+  let ran = TestBox(0)
+  let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
+
+  executor.detach()
+  Task.detached {
+    await withTaskExecutorPreference(executor) {
+      ran.with { $0 += 1 }
+    }
+  }
+  try await Task.sleep(for: .milliseconds(100))
+
+  #expect(ran.get() == 0)
+  dispatcher.stopAndJoin()
+}
+
+/// Abandoning an executor without detaching posts finalize best-effort:
+/// the binding dies at scope exit while a job is still executing — the
+/// in-flight task's captures keep the executor alive until the job
+/// completes, so deinit follows the backlog and FIFO still orders
+/// finalize after all work.
+@Test func abandonedExecutorPostsFinalizeOnDeinit() async throws {
+  let dispatcher = TestPumpDispatcher()
+  let order = TestBox<[String]>([])
+  let finalThreads = TestBox<[ThreadID]>([])
+  let running = DispatchSemaphore(value: 0)
+  var boundThreadID: ThreadID?
+  var pending: Task<Void, Never>?
+
+  do {
+    let executor = try await AttachedThreadExecutor.attach(
+      to: dispatcher,
+      finalize: {
+        order.with { $0.append("finalize") }
+        finalThreads.with { $0.append(ThreadID.current) }
+      }
+    )
+    boundThreadID = executor.threadID
+    pending = Task {
+      await withTaskExecutorPreference(executor) {
+        order.with { $0.append("job") }
+        running.signal()
+      }
+    }
+    waitForSignal(running)
+  }
+
+  await pending!.value
+
+  var attempts = 100
+  while finalThreads.get().isEmpty && attempts > 0 {
+    try await Task.sleep(for: .milliseconds(10))
+    attempts -= 1
+  }
+  #expect(order.get() == ["job", "finalize"])
+  #expect(finalThreads.get().count == 1)
+  #expect(finalThreads.get().first == boundThreadID)
+
+  dispatcher.stopAndJoin()
+}

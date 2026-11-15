@@ -21,9 +21,10 @@ import Synchronization
 /// the library neither creates nor stops the thread; when `run()` returns,
 /// control is back with the caller's code on that same thread.
 ///
-/// `finalize` is this pump's exit hook — the self-attach counterpart of
-/// `DedicatedThreadExecutor`'s: it runs once on the owner thread at
-/// `run()` exit, after the queue drained.
+/// `finalize` is the pump's own exit hook, for bare pump usage (post/run
+/// without an attached executor): it runs once on the owner thread at
+/// `run()` exit, after the queue drained. Attachment finalization belongs
+/// to the attached executor's `detach()`, not here.
 public final class QueueDispatcher: FixedThreadDispatcher {
   private let producer: SharedQueueProducer<@Sendable () -> Void>
   private let consumer: QueueConsumer<@Sendable () -> Void>

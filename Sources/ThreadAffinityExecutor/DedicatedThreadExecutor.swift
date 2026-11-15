@@ -33,8 +33,9 @@ import Foundation
 ///   accepts jobs the moment construction completes.
 /// - The running `Thread` is retained by Foundation until `main()` returns,
 ///   so the executor cannot deallocate underneath an accepted-but-unrun job.
-/// - `shutdown()` requires the quiescence contract: no actor, task or
-///   external producer may still submit jobs. Remaining queued jobs are
+/// - `shutdown()` — the dedicated modality's attach termination —
+///   requires the quiescence contract: no actor, task or external producer
+///   may still submit jobs. Remaining queued jobs are
 ///   executed before the thread exits; a job enqueued from the
 ///   `shutdown()` request onward is dropped and reported by the
 ///   producer's `enqueue` returning `false`.

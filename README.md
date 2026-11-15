@@ -10,8 +10,8 @@ Thread-affinity executors for Swift Concurrency: every job accepted by one of th
 | `ThreadID` | Cross-platform OS thread ID value type (Darwin `pthread_threadid_np` / Linux `gettid` / Windows `GetCurrentThreadId`); `Foundation.Thread` exposes no unified numeric TID | ✅ |
 | `ThreadBoundExecutor` | `SerialExecutor + TaskExecutor` protocol; `isIsolatingCurrentContext()` (Swift 6.2) with a `checkIsolated()` fallback | ✅ |
 | `DedicatedThreadExecutor` | Subclasses `Foundation.Thread` directly; `init(name:initialize:finalize:)` runs `initialize` once on the worker thread before the first job (errors rethrown, executor never published) and `finalize` after drain; jobs travel through the `BlockingQueue` library | ✅ |
-| `AttachedThreadExecutor` + `FixedThreadDispatcher` | Attaches to any fixed thread exposing a `post` entry (`MainQueueDispatcher` for the main queue, RunLoop hosts, third-party event loops) via a posted handshake that runs caller `initialize` on the target thread before any job (failures throw); `attachOnCurrentThread(to:initialize:)` self-attaches synchronously to caller-driven pumps | ✅ |
-| `QueueDispatcher` | Library-provided pump for threads without an event loop (program main threads, host entry threads): `post` queues, `run()` occupies the calling thread until `stop()` and a drained queue, then runs the constructor's `finalize` once — pair with `attachOnCurrentThread(to:)` | ✅ |
+| `AttachedThreadExecutor` + `FixedThreadDispatcher` | Attaches to any fixed thread exposing a `post` entry (`MainQueueDispatcher` for the main queue, RunLoop hosts, third-party event loops) via a posted handshake that runs caller `initialize` on the target thread before any job (failures throw); `attachOnCurrentThread(to:initialize:)` self-attaches synchronously to caller-driven pumps; `detach()` terminates the attachment — posts `finalize` after all accepted work and joins | ✅ |
+| `QueueDispatcher` | Library-provided pump for threads without an event loop (program main threads, host entry threads): `post` queues, `run()` occupies the calling thread until `stop()` and a drained queue, then runs its own `finalize` once (bare-pump hook; attachment finalization is `detach()`'s) — pair with `attachOnCurrentThread(to:)` | ✅ |
 | Shutdown scopes / task tracking | Full quiescence machinery | ⏳ explicit quiescence contract for now |
 
 ## Contract
@@ -20,7 +20,7 @@ Thread-affinity executors for Swift Concurrency: every job accepted by one of th
 - `enqueue` is safe from any thread; jobs never overlap and run exactly once.
 - While jobs may still arrive, the executor and its scheduling backend stay alive.
 
-> **Quiescence contract**: before `shutdown()`, no actor, task or external producer may submit further jobs. Queued jobs drain before the thread exits; once production is closed — from the `stop()` / `shutdown()` request onward — enqueueing drops the job and the producer end's `enqueue` returns `false`. Borrowed threads (main thread / attached backends) are not stopped by the library and expose no shutdown; caller-driven pumps stop through `QueueDispatcher.stop()` with the same drain-then-exit semantics.
+> **Quiescence contract**: before `shutdown()`, no actor, task or external producer may submit further jobs. Queued jobs drain before the thread exits; once production is closed — from the `stop()` / `shutdown()` request onward — enqueueing drops the job and the producer end's `enqueue` returns `false`. Borrowed threads (main thread / attached backends) are not stopped by the library and expose no thread shutdown; attachments terminate through `detach()` — `finalize` posted after all accepted work, joined; detach before stopping the pump, since a pump that no longer accepts posts cannot deliver the finalize and the join blocks. Abandoning an executor without detaching posts its `finalize` best-effort. Caller-driven pumps stop through `QueueDispatcher.stop()` with the same drain-then-exit semantics.
 
 ## Quick start
 
