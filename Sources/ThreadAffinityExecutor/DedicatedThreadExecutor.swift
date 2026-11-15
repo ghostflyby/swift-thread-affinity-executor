@@ -26,8 +26,9 @@ import Foundation
 ///   so the executor cannot deallocate underneath an accepted-but-unrun job.
 /// - `shutdown()` requires the quiescence contract: no actor, task or
 ///   external producer may still submit jobs. Remaining queued jobs are
-///   executed before the thread exits; a job pushed after the loop exited
-///   traps instead of being silently dropped.
+///   executed before the thread exits; a job enqueued after the queue
+///   sealed is dropped and reported by `BlockingQueue.enqueue` returning
+///   `false`.
 public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchecked Sendable {
   /// The worker thread's ID, published during the startup handshake.
   public var threadID: ThreadID {
@@ -59,13 +60,13 @@ public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchec
   public override func main() {
     handshake.publish(ThreadID.current)
 
-    while let job = queue.waitAndTake() {
+    while let job = queue.take() {
       runJob(job)
     }
   }
 
   public func enqueue(_ job: consuming ExecutorJob) {
-    queue.push(UnownedJob(job))
+    queue.enqueue(UnownedJob(job))
   }
 
   /// Requests shutdown and blocks until the queue drained and sealed

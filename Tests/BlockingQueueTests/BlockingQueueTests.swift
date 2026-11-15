@@ -24,64 +24,78 @@ private final class Collector: Sendable {
 @Test func fifoOrderWithinSingleProducer() {
   let queue = BlockingQueue<Int>()
   for i in 0..<100 {
-    queue.push(i)
+    queue.enqueue(i)
   }
   for i in 0..<100 {
-    #expect(queue.waitAndTake() == i)
+    #expect(queue.take() == i)
   }
   #expect(queue.isClosed == false)
 }
 
-@Test func blockedTakeWakesOnPush() async {
+@Test func blockedTakeWakesOnEnqueue() async {
   let queue = BlockingQueue<String>()
   let taker = Task.detached {
-    queue.waitAndTake()
+    queue.take()
   }
   // the queue is empty and open, so the taker can only still be blocked
   try? await Task.sleep(for: .milliseconds(50))
 
-  queue.push("hello")
+  queue.enqueue("hello")
   let value = await taker.value
   #expect(value == "hello")
 }
 
 @Test func closeDrainsRemainingElementsThenSeals() {
   let queue = BlockingQueue<Int>()
-  queue.push(1)
-  queue.push(2)
+  queue.enqueue(1)
+  queue.enqueue(2)
 
   queue.close()
   #expect(queue.isClosed)
   #expect(queue.isSealed == false)
 
-  // elements pushed before close stay available
-  #expect(queue.waitAndTake() == 1)
-  #expect(queue.waitAndTake() == 2)
+  // elements enqueued before close stay available
+  #expect(queue.take() == 1)
+  #expect(queue.take() == 2)
   #expect(queue.isSealed == false)
 
   // the take that observes closed-and-empty returns nil and seals
-  #expect(queue.waitAndTake() == nil)
+  #expect(queue.take() == nil)
   #expect(queue.isSealed)
-  #expect(queue.waitAndTake() == nil)
+  #expect(queue.take() == nil)
 }
 
 @Test func closeOnEmptyQueueSealsOnFirstTake() {
   let queue = BlockingQueue<Int>()
   queue.close()
-  #expect(queue.waitAndTake() == nil)
+  #expect(queue.take() == nil)
   #expect(queue.isSealed)
+}
+
+@Test func enqueueReportsSuccessAndSealedFailure() {
+  let queue = BlockingQueue<Int>()
+  #expect(queue.enqueue(1))
+  #expect(queue.take() == 1)
+
+  queue.close()
+  #expect(queue.take() == nil)
+  #expect(queue.isSealed)
+
+  // sealed: the element is discarded and reported as failure
+  #expect(queue.enqueue(42) == false)
+  #expect(queue.take() == nil)
 }
 
 @Test func waitUntilSealedReturnsAfterConsumerDrains() async {
   let queue = BlockingQueue<Int>()
-  queue.push(7)
+  queue.enqueue(7)
   queue.close()
 
   let waiter = Task.detached {
     queue.waitUntilSealed()
   }
-  #expect(queue.waitAndTake() == 7)
-  #expect(queue.waitAndTake() == nil)
+  #expect(queue.take() == 7)
+  #expect(queue.take() == nil)
 
   await waiter.value
   #expect(queue.isSealed)
@@ -98,7 +112,7 @@ private final class Collector: Sendable {
     // consumers: block on take until the queue seals
     for _ in 0..<2 {
       group.addTask {
-        while let value = queue.waitAndTake() {
+        while let value = queue.take() {
           collector.append(value)
         }
       }
@@ -109,7 +123,7 @@ private final class Collector: Sendable {
         for p in 0..<producerCount {
           producers.addTask {
             for i in 0..<perProducer {
-              queue.push(p * perProducer + i)
+              queue.enqueue(p * perProducer + i)
             }
           }
         }

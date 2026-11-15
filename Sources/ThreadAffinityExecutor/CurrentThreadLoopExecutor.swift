@@ -37,7 +37,7 @@ public final class CurrentThreadLoopExecutor: ThreadBoundExecutor {
   }
 
   public func enqueue(_ job: consuming ExecutorJob) {
-    queue.push(UnownedJob(job))
+    queue.enqueue(UnownedJob(job))
   }
 
   /// Occupies the calling thread, executing enqueued jobs until `stop()`
@@ -48,14 +48,15 @@ public final class CurrentThreadLoopExecutor: ThreadBoundExecutor {
   ///   guarantee, hence the precondition.
   /// - A loop whose `run()` already completed has nothing left to do and
   ///   returns immediately.
-  /// - Jobs enqueued after the loop exited trap in `enqueue`.
+  /// - Jobs enqueued after the loop exited are dropped
+  ///   (`BlockingQueue.enqueue` returns `false`).
   public func run() {
     precondition(
       ThreadID.current == threadID,
       "run() must be called from the thread the loop was installed on: expected \(threadID), got \(ThreadID.current)"
     )
 
-    while let job = queue.waitAndTake() {
+    while let job = queue.take() {
       runJob(job)
     }
   }
