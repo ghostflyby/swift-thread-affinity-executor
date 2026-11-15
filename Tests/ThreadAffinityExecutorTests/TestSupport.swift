@@ -38,6 +38,6 @@ final class ThreadSafeCounter: Sendable {
 
   func increment(recording threads: TestBox<Set<ThreadID>>) {
     _ = count.wrappingAdd(1, ordering: .relaxed)
-    threads.with { $0.insert(ThreadID.current) }
+    threads.with { _ = $0.insert(ThreadID.current) }
   }
 }

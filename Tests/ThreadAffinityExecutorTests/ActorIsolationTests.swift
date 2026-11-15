@@ -50,25 +50,23 @@ actor Counter {
 /// A custom `unownedExecutor` drives actor methods
 /// on the dedicated thread.
 @Test func actorRunsOnBoundThread() async throws {
-  let executor = DedicatedThreadExecutor(name: "tae-actor")
-  let counter = Counter(executor: executor)
+  let counter = Counter(executor: DedicatedThreadExecutor(name: "tae-actor"))
 
   #expect(await counter.boundThreadHolds())
   #expect(await counter.next() == 1)
   #expect(await counter.next() == 2)
 
-  executor.shutdown()
+  counter.executor.shutdown()
 }
 
 /// After suspension and resumption the actor
 /// isolation still lands on the bound thread.
 @Test func actorIsolationSurvivesSuspension() async throws {
-  let executor = DedicatedThreadExecutor(name: "tae-actor-hop")
-  let counter = Counter(executor: executor)
+  let counter = Counter(executor: DedicatedThreadExecutor(name: "tae-actor-hop"))
 
   #expect(await counter.hopAwayAndComeBack())
 
-  executor.shutdown()
+  counter.executor.shutdown()
 }
 
 /// Second actor sharing the same dedicated executor (one executor may
@@ -99,14 +97,13 @@ actor Sibling {
 /// from the bound thread is accepted via dynamic isolation checking — even
 /// across different actor objects sharing the thread.
 @Test func assumeIsolatedSucceedsOnBoundThread() async throws {
-  let executor = DedicatedThreadExecutor(name: "tae-assume")
-  let counter = Counter(executor: executor)
-  let sibling = Sibling(executor: executor, counter: counter)
+  let counter = Counter(executor: DedicatedThreadExecutor(name: "tae-assume"))
+  let sibling = Sibling(executor: counter.executor, counter: counter)
 
   let result = await sibling.syncAccessCounter()
 
   #expect(result == 1)
-  executor.shutdown()
+  counter.executor.shutdown()
 }
 
 /// Old-runtime fallback path: `checkIsolated()` — the

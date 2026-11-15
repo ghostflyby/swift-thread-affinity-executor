@@ -26,16 +26,18 @@ import Foundation
 ///   so the executor cannot deallocate underneath an accepted-but-unrun job.
 /// - `shutdown()` requires the quiescence contract: no actor, task or
 ///   external producer may still submit jobs. Remaining queued jobs are
-///   executed before the thread exits; a job enqueued after the queue
-///   sealed is dropped and reported by `BlockingQueue.enqueue` returning
-///   `false`.
+///   executed before the thread exits; a job enqueued from the
+///   `shutdown()` request onward is dropped and reported by the
+///   producer's `enqueue` returning `false`.
 public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchecked Sendable {
   /// The worker thread's ID, published during the startup handshake.
   public var threadID: ThreadID {
     handshake.threadID
   }
 
-  private let queue = BlockingQueue<UnownedJob>()
+  private let producer: SharedQueueProducer<UnownedJob>
+  private let consumer: QueueConsumer<UnownedJob>
+  private let supervisor: QueueSupervisor<UnownedJob>
   private let handshake = StartupHandshake()
 
   /// Creates the worker thread and waits for its startup handshake.
@@ -46,6 +48,10 @@ public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchec
   /// cannot be spawned (resource exhaustion) blocks this initializer —
   /// accepted in exchange for not re-implementing thread management.
   public init(name: String? = nil) {
+    let ends = Queue<UnownedJob>().split()
+    self.producer = ends.producer.share()
+    self.consumer = ends.consumer
+    self.supervisor = ends.supervisor
     super.init()
     if let name {
       self.name = name
@@ -60,17 +66,18 @@ public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchec
   public override func main() {
     handshake.publish(ThreadID.current)
 
-    while let job = queue.take() {
+    while let job = consumer.take() {
       runJob(job)
     }
   }
 
   public func enqueue(_ job: consuming ExecutorJob) {
-    queue.enqueue(UnownedJob(job))
+    producer.enqueue(UnownedJob(job))
   }
 
   /// Requests shutdown and blocks until the queue drained and sealed
-  /// (the worker's service loop is exiting).
+  /// (the worker's service loop is exiting). Jobs arriving after this
+  /// request are dropped.
   ///
   /// - Precondition: called off the bound thread with the quiescence
   ///   contract satisfied (canceling tasks does not by itself guarantee
@@ -80,13 +87,13 @@ public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchec
       ThreadID.current != threadID,
       "shutdown() must not be called from the executor's bound thread"
     )
-    queue.close()
-    queue.waitUntilSealed()
+    supervisor.close()
+    supervisor.waitUntilSealed()
   }
 
   /// Whether the queue sealed, i.e. the worker observed drain-and-close
   /// and is exiting. Internal; tests and diagnostics.
   var hasFinished: Bool {
-    queue.isSealed
+    supervisor.isSealed
   }
 }

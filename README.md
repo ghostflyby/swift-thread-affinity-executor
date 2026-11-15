@@ -6,7 +6,7 @@ Thread-affinity executors for Swift Concurrency: every job accepted by one of th
 
 | Type | Notes | Status |
 | --- | --- | --- |
-| `BlockingQueue` (separate library product) | Generic blocking FIFO queue: producers append to the back, takers block and remove from the front — both O(1) on `UniqueDeque` (swift-collections); `close()` drains-then-seals, late `enqueue` returns `false` | ✅ |
+| `BlockingQueue` (separate library product) | Split-endpoint blocking FIFO queues: a linear queue token (`Queue` unbounded / `BoundedQueue` fixed capacity) is consumed by `split()` into producer and consumer ends plus a non-minting supervisor; ends come in move-only unique (`~Copyable`) and cloneable shared (`Sendable`) tiers; enqueue is a `Bool`-returning try, bounded producers add `enqueueBlocking`; ends auto-disconnect on release (last producer closes, last consumer seals) | ✅ |
 | `ThreadID` | Cross-platform OS thread ID value type (Darwin `pthread_threadid_np` / Linux `gettid` / Windows `GetCurrentThreadId`); `Foundation.Thread` exposes no unified numeric TID | ✅ |
 | `ThreadBoundExecutor` | `SerialExecutor + TaskExecutor` protocol; `isIsolatingCurrentContext()` (Swift 6.2) with a `checkIsolated()` fallback | ✅ |
 | `DedicatedThreadExecutor` | Subclasses `Foundation.Thread` directly; synchronous `init(name:)` completes the startup handshake; jobs travel through the `BlockingQueue` library; the worker's `ThreadID` is published through a one-shot handshake | ✅ |
@@ -21,7 +21,7 @@ Thread-affinity executors for Swift Concurrency: every job accepted by one of th
 - `enqueue` is safe from any thread; jobs never overlap and run exactly once.
 - While jobs may still arrive, the executor and its scheduling backend stay alive.
 
-> **Quiescence contract**: before `shutdown()`, no actor, task or external producer may submit further jobs. Queued jobs drain before the thread exits; enqueueing after the queue sealed drops the job and `BlockingQueue.enqueue` returns `false`. Borrowed threads (main thread / attached backends) are not stopped by the library and expose no shutdown.
+> **Quiescence contract**: before `shutdown()`, no actor, task or external producer may submit further jobs. Queued jobs drain before the thread exits; once production is closed — from the `stop()` / `shutdown()` request onward — enqueueing drops the job and the producer end's `enqueue` returns `false`. Borrowed threads (main thread / attached backends) are not stopped by the library and expose no shutdown.
 
 ## Quick start
 

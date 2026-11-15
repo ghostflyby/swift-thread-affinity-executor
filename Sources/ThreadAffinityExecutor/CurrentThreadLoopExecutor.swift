@@ -21,9 +21,15 @@ public final class CurrentThreadLoopExecutor: ThreadBoundExecutor {
   /// Captured synchronously on the installing thread.
   public let threadID: ThreadID
 
-  private let queue = BlockingQueue<UnownedJob>()
+  private let producer: SharedQueueProducer<UnownedJob>
+  private let consumer: QueueConsumer<UnownedJob>
+  private let supervisor: QueueSupervisor<UnownedJob>
 
   private init(threadID: ThreadID) {
+    let ends = Queue<UnownedJob>().split()
+    self.producer = ends.producer.share()
+    self.consumer = ends.consumer
+    self.supervisor = ends.supervisor
     self.threadID = threadID
   }
 
@@ -37,7 +43,7 @@ public final class CurrentThreadLoopExecutor: ThreadBoundExecutor {
   }
 
   public func enqueue(_ job: consuming ExecutorJob) {
-    queue.enqueue(UnownedJob(job))
+    producer.enqueue(UnownedJob(job))
   }
 
   /// Occupies the calling thread, executing enqueued jobs until `stop()`
@@ -48,28 +54,30 @@ public final class CurrentThreadLoopExecutor: ThreadBoundExecutor {
   ///   guarantee, hence the precondition.
   /// - A loop whose `run()` already completed has nothing left to do and
   ///   returns immediately.
-  /// - Jobs enqueued after the loop exited are dropped
-  ///   (`BlockingQueue.enqueue` returns `false`).
+  /// - From the `stop()` request onward, new jobs are dropped (producer
+  ///   `enqueue` returns `false`); jobs already queued still run before
+  ///   `run()` returns.
   public func run() {
     precondition(
       ThreadID.current == threadID,
       "run() must be called from the thread the loop was installed on: expected \(threadID), got \(ThreadID.current)"
     )
 
-    while let job = queue.take() {
+    while let job = consumer.take() {
       runJob(job)
     }
   }
 
   /// Requests that `run()` stop once the queue drained. Safe from any
-  /// thread, including from inside a job running on the loop.
+  /// thread, including from inside a job running on the loop. Jobs arriving
+  /// after this request are dropped.
   public func stop() {
-    queue.close()
+    supervisor.close()
   }
 
   /// Whether the queue sealed (the loop is draining out or already
   /// returned). Internal; tests and diagnostics.
   var lifecycleIsDeactivated: Bool {
-    queue.isSealed
+    supervisor.isSealed
   }
 }

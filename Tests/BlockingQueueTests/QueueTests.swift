@@ -1,0 +1,238 @@
+//
+//  QueueTests.swift
+//  BlockingQueueTests
+//
+
+import BlockingQueue
+import DequeModule
+import Foundation
+import Testing
+
+@Test func fifoOrderWithUniqueEnds() {
+  let ends = Queue<Int>().split()
+
+  for i in 0..<100 {
+    let accepted = ends.producer.enqueue(i)
+    #expect(accepted)
+  }
+  for i in 0..<100 {
+    let element = ends.consumer.take()
+    #expect(element == i)
+  }
+
+  release(ends.producer)
+  let sealed = ends.consumer.take()
+  #expect(sealed == nil)
+  #expect(ends.supervisor.isSealed)
+  release(ends.consumer)
+}
+
+@Test func blockedTakeWakesOnEnqueue() async {
+  let ends = Queue<String>().split()
+  let consumer = ends.consumer.share()
+
+  let taker = Task.detached {
+    consumer.take()
+  }
+  // the queue is empty and open, so the taker can only still be blocked
+  try? await Task.sleep(for: .milliseconds(50))
+
+  let accepted = ends.producer.enqueue("hello")
+  #expect(accepted)
+  let value = await taker.value
+  #expect(value == "hello")
+
+  release(ends.producer)
+}
+
+@Test func supervisorCloseDrainsThenSeals() {
+  let ends = Queue<Int>().split()
+  ends.producer.enqueue(1)
+  ends.producer.enqueue(2)
+
+  ends.supervisor.close()
+  #expect(ends.supervisor.isClosed)
+  #expect(ends.supervisor.isSealed == false)
+
+  // elements enqueued before close stay available
+  let first = ends.consumer.take()
+  #expect(first == 1)
+  let second = ends.consumer.take()
+  #expect(second == 2)
+  #expect(ends.supervisor.isSealed == false)
+
+  // the take that observes closed-and-empty returns nil and seals
+  let drained = ends.consumer.take()
+  #expect(drained == nil)
+  #expect(ends.supervisor.isSealed)
+
+  release(ends.producer)
+  release(ends.consumer)
+}
+
+@Test func closeOnEmptySealsOnFirstTake() {
+  let ends = Queue<Int>().split()
+  ends.supervisor.close()
+  let drained = ends.consumer.take()
+  #expect(drained == nil)
+  #expect(ends.supervisor.isSealed)
+
+  release(ends.producer)
+  release(ends.consumer)
+}
+
+@Test func enqueueFailsAfterSeal() {
+  let ends = Queue<Int>().split()
+  ends.producer.enqueue(1)
+  ends.supervisor.close()
+  let first = ends.consumer.take()
+  #expect(first == 1)
+  let drained = ends.consumer.take()
+  #expect(drained == nil)
+  #expect(ends.supervisor.isSealed)
+
+  // sealed: the element is discarded and reported as failure
+  let accepted = ends.producer.enqueue(42)
+  #expect(accepted == false)
+
+  release(ends.producer)
+  release(ends.consumer)
+}
+
+@Test func producerFinishClosesProduction() {
+  let ends = Queue<Int>().split()
+  ends.producer.enqueue(7)
+
+  ends.producer.finish()
+  #expect(ends.supervisor.isClosed)
+
+  let element = ends.consumer.take()
+  #expect(element == 7)
+  let drained = ends.consumer.take()
+  #expect(drained == nil)
+  release(ends.consumer)
+}
+
+@Test func producerReleaseClosesProduction() {
+  let ends = Queue<Int>().split()
+  release(ends.producer)
+
+  // last producer end gone: closed and empty, the take seals
+  let drained = ends.consumer.take()
+  #expect(drained == nil)
+  #expect(ends.supervisor.isSealed)
+  release(ends.consumer)
+}
+
+@Test func consumerReleaseFailsEnqueue() {
+  let ends = Queue<Int>().split()
+  release(ends.consumer)
+
+  #expect(ends.supervisor.isSealed)
+  let accepted = ends.producer.enqueue(1)
+  #expect(accepted == false)
+  release(ends.producer)
+}
+
+@Test func supervisorDrainAllTakesEverythingInOrder() {
+  let ends = Queue<Int>().split()
+  ends.producer.enqueue(1)
+  ends.producer.enqueue(2)
+  ends.producer.enqueue(3)
+
+  var drained = ends.supervisor.drainAll()
+  #expect(drained.count == 3)
+  #expect(ends.supervisor.count == 0)
+
+  var received: [Int] = []
+  while let element = drained.popFirst() {
+    received.append(element)
+  }
+  #expect(received == [1, 2, 3])
+
+  release(ends.producer)
+  release(ends.consumer)
+}
+
+@Test func waitUntilSealedReturnsAfterConsumerDrains() async {
+  let ends = Queue<Int>().split()
+  ends.producer.enqueue(7)
+  ends.supervisor.close()
+
+  let supervisor = ends.supervisor
+  let waiter = Task.detached {
+    supervisor.waitUntilSealed()
+  }
+
+  let element = ends.consumer.take()
+  #expect(element == 7)
+  let drained = ends.consumer.take()
+  #expect(drained == nil)
+
+  await waiter.value
+  #expect(ends.supervisor.isSealed)
+
+  release(ends.producer)
+  release(ends.consumer)
+}
+
+@Test func concurrentSharedEndsDeliverExactlyOnce() async {
+  let ends = Queue<Int>().split()
+  let producer = ends.producer.share()
+  let consumer = ends.consumer.share()
+  let supervisor = ends.supervisor
+
+  let producerCount = 4
+  let perProducer = 500
+  let total = producerCount * perProducer
+  let collector = Collector()
+
+  await withTaskGroup(of: Void.self) { group in
+    // two takers compete on the shared consumer end
+    for _ in 0..<2 {
+      group.addTask {
+        while let value = consumer.take() {
+          collector.append(value)
+        }
+      }
+    }
+    // producers run to completion, then production closes
+    group.addTask {
+      await withTaskGroup(of: Void.self) { producers in
+        for p in 0..<producerCount {
+          producers.addTask {
+            for i in 0..<perProducer {
+              producer.enqueue(p * perProducer + i)
+            }
+          }
+        }
+      }
+      producer.close()
+    }
+  }
+
+  supervisor.waitUntilSealed()
+
+  let received = collector.snapshot()
+  #expect(received.count == total)
+  var counts: Set<Int> = []
+  for value in received {
+    counts.insert(value)
+  }
+  #expect(counts.count == total)
+}
+
+@Test func sharedConsumerReleaseSeals() {
+  let ends = Queue<Int>().split()
+  var consumer: SharedQueueConsumer<Int>? = ends.consumer.share()
+  #expect(consumer != nil)
+  #expect(ends.supervisor.isSealed == false)
+
+  // dropping the last reference disconnects the shared end: sealed
+  consumer = nil
+  #expect(ends.supervisor.isSealed)
+
+  let accepted = ends.producer.enqueue(1)
+  #expect(accepted == false)
+  release(ends.producer)
+}
