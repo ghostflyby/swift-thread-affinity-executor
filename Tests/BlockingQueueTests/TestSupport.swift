@@ -38,3 +38,16 @@ final class Collector: Sendable {
 /// Consumes a move-only value so its deinit (and its disconnect effect)
 /// runs deterministically.
 func release<T: ~Copyable>(_ value: consuming T) {}
+
+/// Deliberately non-`Sendable` reference payload: proves queue elements
+/// need only ownership transfer, not concurrent shareability.
+final class OpaquePayload {
+  let value: Int
+
+  init(value: Int) {
+    self.value = value
+  }
+}
+
+/// Deliberately ~Copyable (and therefore non-`Sendable`) payload.
+struct SingleShot: ~Copyable {}

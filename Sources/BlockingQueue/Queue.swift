@@ -9,7 +9,12 @@
 /// Linear construction token for an unbounded queue.
 ///
 /// `split()` consumes the token; afterwards no further ends can be minted.
-public struct Queue<Element: Sendable & ~Copyable>: ~Copyable, Sendable {
+///
+/// Elements need not be `Sendable`: ownership transfers through the queue —
+/// `consuming sending` in on enqueue, `sending` out on take. The handoff
+/// is compiler-enforced (the check lives in the SIL sendability pass, so
+/// it surfaces on build rather than in a pure typecheck).
+public struct Queue<Element: ~Copyable>: ~Copyable, Sendable {
   let cell: QueueCell<Element>
 
   public init() {
@@ -31,7 +36,7 @@ public struct Queue<Element: Sendable & ~Copyable>: ~Copyable, Sendable {
 
 /// The three capabilities handed out by `Queue.split()`: move-only.
 @frozen
-public struct QueueEnds<Element: Sendable & ~Copyable>: ~Copyable, Sendable {
+public struct QueueEnds<Element: ~Copyable>: ~Copyable, Sendable {
   public let producer: QueueProducer<Element>
   public let consumer: QueueConsumer<Element>
   public let supervisor: QueueSupervisor<Element>
@@ -50,7 +55,7 @@ public struct QueueEnds<Element: Sendable & ~Copyable>: ~Copyable, Sendable {
 /// Single, move-only producer end of an unbounded queue.
 ///
 /// Releasing the end (or `finish()`) closes production.
-public struct QueueProducer<Element: Sendable & ~Copyable>: ~Copyable, Sendable {
+public struct QueueProducer<Element: ~Copyable>: ~Copyable, Sendable {
   let cell: QueueCell<Element>
 
   init(cell: QueueCell<Element>) {
@@ -59,10 +64,13 @@ public struct QueueProducer<Element: Sendable & ~Copyable>: ~Copyable, Sendable 
 
   /// Appends `element` to the back; the queue grows as needed.
   ///
+  /// The element is handed over (`consuming sending`): a non-`Sendable`
+  /// element must not be used after the call.
+  ///
   /// Returns `false` (discarding `element`) once production is closed or no
   /// consumer end remains.
   @discardableResult
-  public func enqueue(_ element: consuming Element) -> Bool {
+  public func enqueue(_ element: consuming sending Element) -> Bool {
     cell.enqueue(element)
   }
 
@@ -91,7 +99,7 @@ public struct QueueProducer<Element: Sendable & ~Copyable>: ~Copyable, Sendable 
 ///
 /// Production closes through `close()` or once every producer end (shared
 /// or unique) is released.
-public final class SharedQueueProducer<Element: Sendable & ~Copyable>: Sendable {
+public final class SharedQueueProducer<Element: ~Copyable>: Sendable {
   private let cell: QueueCell<Element>
 
   init(cell: QueueCell<Element>) {
@@ -105,10 +113,13 @@ public final class SharedQueueProducer<Element: Sendable & ~Copyable>: Sendable 
 
   /// Appends `element` to the back; the queue grows as needed.
   ///
+  /// The element is handed over (`consuming sending`): a non-`Sendable`
+  /// element must not be used after the call.
+  ///
   /// Returns `false` (discarding `element`) once production is closed or no
   /// consumer end remains.
   @discardableResult
-  public func enqueue(_ element: consuming Element) -> Bool {
+  public func enqueue(_ element: consuming sending Element) -> Bool {
     cell.enqueue(element)
   }
 

@@ -10,7 +10,7 @@
 import DequeModule
 import Foundation
 
-final class QueueCell<Element: Sendable & ~Copyable>: @unchecked Sendable {
+final class QueueCell<Element: ~Copyable>: @unchecked Sendable {
   let condition = NSCondition()
   var elements = UniqueDeque<Element>()
   let capacity: Int?
@@ -64,7 +64,7 @@ final class QueueCell<Element: Sendable & ~Copyable>: @unchecked Sendable {
 
   /// Blocking take; `nil` seals the queue (closed and drained) in the same
   /// critical section.
-  func take() -> Element? {
+  func take() -> sending Element? {
     condition.lock()
     while elements.isEmpty && !closed && !sealed {
       condition.wait()
@@ -148,7 +148,7 @@ final class QueueCell<Element: Sendable & ~Copyable>: @unchecked Sendable {
   }
 
   /// Removes and returns everything currently queued.
-  func drainAll() -> UniqueDeque<Element> {
+  func drainAll() -> sending UniqueDeque<Element> {
     condition.lock()
     var drained = UniqueDeque<Element>()
     swap(&drained, &elements)

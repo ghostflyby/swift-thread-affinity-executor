@@ -9,7 +9,12 @@
 /// Linear construction token for a bounded queue with fixed capacity.
 ///
 /// `split()` consumes the token; afterwards no further ends can be minted.
-public struct BoundedQueue<Element: Sendable & ~Copyable>: ~Copyable, Sendable {
+///
+/// Elements need not be `Sendable`: ownership transfers through the queue —
+/// `consuming sending` in on enqueue, `sending` out on take. The handoff
+/// is compiler-enforced (the check lives in the SIL sendability pass, so
+/// it surfaces on build rather than in a pure typecheck).
+public struct BoundedQueue<Element: ~Copyable>: ~Copyable, Sendable {
   let cell: QueueCell<Element>
 
   /// - Precondition: `capacity >= 1`.
@@ -33,7 +38,7 @@ public struct BoundedQueue<Element: Sendable & ~Copyable>: ~Copyable, Sendable {
 
 /// The three capabilities handed out by `BoundedQueue.split()`: move-only.
 @frozen
-public struct BoundedQueueEnds<Element: Sendable & ~Copyable>: ~Copyable, Sendable {
+public struct BoundedQueueEnds<Element: ~Copyable>: ~Copyable, Sendable {
   public let producer: BoundedQueueProducer<Element>
   public let consumer: QueueConsumer<Element>
   public let supervisor: QueueSupervisor<Element>
@@ -52,7 +57,7 @@ public struct BoundedQueueEnds<Element: Sendable & ~Copyable>: ~Copyable, Sendab
 /// Single, move-only producer end of a bounded queue.
 ///
 /// Releasing the end (or `finish()`) closes production.
-public struct BoundedQueueProducer<Element: Sendable & ~Copyable>: ~Copyable, Sendable {
+public struct BoundedQueueProducer<Element: ~Copyable>: ~Copyable, Sendable {
   let cell: QueueCell<Element>
 
   init(cell: QueueCell<Element>) {
@@ -61,19 +66,25 @@ public struct BoundedQueueProducer<Element: Sendable & ~Copyable>: ~Copyable, Se
 
   /// Tries to append `element` without waiting.
   ///
+  /// The element is handed over (`consuming sending`): a non-`Sendable`
+  /// element must not be used after the call.
+  ///
   /// Returns `false` (discarding `element`) when the queue is full,
   /// production is closed, or no consumer end remains.
   @discardableResult
-  public func enqueue(_ element: consuming Element) -> Bool {
+  public func enqueue(_ element: consuming sending Element) -> Bool {
     cell.enqueue(element)
   }
 
   /// Appends `element`, waiting while the queue is full.
   ///
+  /// The element is handed over (`consuming sending`): a non-`Sendable`
+  /// element must not be used after the call.
+  ///
   /// Returns `false` (discarding `element`) once production is closed or no
   /// consumer end remains.
   @discardableResult
-  public func enqueueBlocking(_ element: consuming Element) -> Bool {
+  public func enqueueBlocking(_ element: consuming sending Element) -> Bool {
     cell.enqueueBlocking(element)
   }
 
@@ -99,7 +110,7 @@ public struct BoundedQueueProducer<Element: Sendable & ~Copyable>: ~Copyable, Se
 
 /// Cloneable, `Sendable` producer end of a bounded queue: any number of
 /// producers sharing one object.
-public final class SharedBoundedQueueProducer<Element: Sendable & ~Copyable>: Sendable {
+public final class SharedBoundedQueueProducer<Element: ~Copyable>: Sendable {
   private let cell: QueueCell<Element>
 
   init(cell: QueueCell<Element>) {
@@ -113,19 +124,25 @@ public final class SharedBoundedQueueProducer<Element: Sendable & ~Copyable>: Se
 
   /// Tries to append `element` without waiting.
   ///
+  /// The element is handed over (`consuming sending`): a non-`Sendable`
+  /// element must not be used after the call.
+  ///
   /// Returns `false` (discarding `element`) when the queue is full,
   /// production is closed, or no consumer end remains.
   @discardableResult
-  public func enqueue(_ element: consuming Element) -> Bool {
+  public func enqueue(_ element: consuming sending Element) -> Bool {
     cell.enqueue(element)
   }
 
   /// Appends `element`, waiting while the queue is full.
   ///
+  /// The element is handed over (`consuming sending`): a non-`Sendable`
+  /// element must not be used after the call.
+  ///
   /// Returns `false` (discarding `element`) once production is closed or no
   /// consumer end remains.
   @discardableResult
-  public func enqueueBlocking(_ element: consuming Element) -> Bool {
+  public func enqueueBlocking(_ element: consuming sending Element) -> Bool {
     cell.enqueueBlocking(element)
   }
 

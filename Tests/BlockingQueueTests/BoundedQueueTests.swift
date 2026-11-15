@@ -236,3 +236,24 @@ import Testing
 
   release(consumer)
 }
+
+/// Non-`Sendable` copyable elements traverse the bounded family too — both
+/// the try and the blocking enqueue resolve to the `sending` handoff.
+@Test func boundedNonSendableElementTraversesQueue() {
+  let ends = BoundedQueue<OpaquePayload>(capacity: 1).split()
+
+  let first = ends.producer.enqueue(OpaquePayload(value: 5))
+  #expect(first)
+  let taken = ends.consumer.take()
+  #expect(taken?.value == 5)
+
+  let second = ends.producer.enqueueBlocking(OpaquePayload(value: 6))
+  #expect(second)
+  ends.producer.finish()
+
+  let last = ends.consumer.take()
+  #expect(last?.value == 6)
+  let drained = ends.consumer.take()
+  #expect(drained == nil)
+  release(ends.consumer)
+}

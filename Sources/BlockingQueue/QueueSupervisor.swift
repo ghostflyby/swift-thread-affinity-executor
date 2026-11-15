@@ -7,7 +7,7 @@ import DequeModule
 
 /// Non-minting control handle over a split queue: closes production, awaits
 /// the terminal state, inspects and drains. Cannot create ends.
-public final class QueueSupervisor<Element: Sendable & ~Copyable>: Sendable {
+public final class QueueSupervisor<Element: ~Copyable>: Sendable {
   let cell: QueueCell<Element>
 
   init(cell: QueueCell<Element>) {
@@ -41,7 +41,7 @@ public final class QueueSupervisor<Element: Sendable & ~Copyable>: Sendable {
   }
 
   /// Removes and returns everything currently queued, in order.
-  public func drainAll() -> UniqueDeque<Element> {
+  public func drainAll() -> sending UniqueDeque<Element> {
     cell.drainAll()
   }
 }

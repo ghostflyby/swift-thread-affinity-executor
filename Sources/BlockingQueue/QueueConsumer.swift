@@ -7,7 +7,7 @@
 /// available; `nil` means the queue is sealed.
 ///
 /// Releasing the end seals the queue from the consumer side.
-public struct QueueConsumer<Element: Sendable & ~Copyable>: ~Copyable, Sendable {
+public struct QueueConsumer<Element: ~Copyable>: ~Copyable, Sendable {
   let cell: QueueCell<Element>
 
   init(cell: QueueCell<Element>) {
@@ -19,7 +19,7 @@ public struct QueueConsumer<Element: Sendable & ~Copyable>: ~Copyable, Sendable 
   ///
   /// Returns `nil` once the queue is closed and fully drained (or no
   /// consumer end remains); that observation seals the queue.
-  public func take() -> Element? {
+  public func take() -> sending Element? {
     cell.take()
   }
 
@@ -39,7 +39,7 @@ public struct QueueConsumer<Element: Sendable & ~Copyable>: ~Copyable, Sendable 
 
 /// Cloneable, `Sendable` consumer end: any number of takers sharing one
 /// object, competing per element.
-public final class SharedQueueConsumer<Element: Sendable & ~Copyable>: Sendable {
+public final class SharedQueueConsumer<Element: ~Copyable>: Sendable {
   private let cell: QueueCell<Element>
 
   init(cell: QueueCell<Element>) {
@@ -56,7 +56,7 @@ public final class SharedQueueConsumer<Element: Sendable & ~Copyable>: Sendable 
   ///
   /// Returns `nil` once the queue is closed and fully drained (or no
   /// consumer end remains); that observation seals the queue.
-  public func take() -> Element? {
+  public func take() -> sending Element? {
     cell.take()
   }
 }

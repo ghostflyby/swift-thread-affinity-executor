@@ -236,3 +236,54 @@ import Testing
   #expect(accepted == false)
   release(ends.producer)
 }
+
+/// Elements need not be `Sendable`: ownership crosses domains through
+/// the queue (created in the sender's domain, consumed in the taker's).
+@Test func nonSendableElementTraversesQueue() async {
+  let ends = Queue<OpaquePayload>().split()
+  let producer = ends.producer.share()
+  let consumer = ends.consumer.share()
+
+  await Task.detached {
+    producer.enqueue(OpaquePayload(value: 42))
+    producer.close()
+  }.value
+
+  guard let payload = consumer.take() else {
+    Issue.record("expected the enqueued element")
+    return
+  }
+  #expect(payload.value == 42)
+  #expect(consumer.take() == nil)
+}
+
+/// The `~Copyable` axis of the element constraint: a move-only payload
+/// traverses the queue as well.
+@Test func nonCopyableElementTraversesQueue() {
+  let ends = Queue<SingleShot>().split()
+  let accepted = ends.producer.enqueue(SingleShot())
+  #expect(accepted)
+  ends.producer.finish()
+
+  guard let token = ends.consumer.take() else {
+    Issue.record("expected the enqueued element")
+    return
+  }
+  release(token)
+  release(ends.consumer)
+}
+
+/// The `sending` handoff must not produce false positives: reusing a
+/// `Sendable` value after enqueue stays legal.
+@Test func sendableElementRemainsUsableAfterEnqueue() {
+  let ends = Queue<Int>().split()
+  let value = 7
+  let accepted = ends.producer.enqueue(value)
+  #expect(accepted)
+  #expect(value == 7)
+
+  release(ends.producer)
+  let taken = ends.consumer.take()
+  #expect(taken == 7)
+  release(ends.consumer)
+}
