@@ -3,52 +3,41 @@
 //  ThreadAffinityExecutorTests
 //
 
-import Foundation
+import Synchronization
+
 @testable import ThreadAffinityExecutor
 
-/// A tiny mutex-guarded box for synchronizing test fixtures.
-final class TestBox<T>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: T
+/// A mutex-guarded box for synchronizing test fixtures.
+final class TestBox<T>: Sendable where T: Sendable {
+  private let value: Mutex<T>
 
-    init(_ value: T) {
-        self.value = value
-    }
+  init(_ value: T) {
+    self.value = Mutex(value)
+  }
 
-    func get() -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return value
-    }
+  func get() -> T {
+    value.withLock { $0 }
+  }
 
-    func set(_ newValue: T) {
-        lock.lock()
-        defer { lock.unlock() }
-        value = newValue
-    }
+  func set(_ newValue: T) {
+    value.withLock { $0 = newValue }
+  }
 
-    func with<R>(_ body: (inout T) -> R) -> R {
-        lock.lock()
-        defer { lock.unlock() }
-        return body(&value)
-    }
+  func with<R>(_ body: (inout T) -> R) -> R {
+    value.withLock { body(&$0) }
+  }
 }
 
-/// Thread-safe counter that also records which threads performed the work.
-final class ThreadSafeCounter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var count = 0
+/// Atomic counter that also records which threads performed the work.
+final class ThreadSafeCounter: Sendable {
+  private let count = Atomic<Int>(0)
 
-    var value: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return count
-    }
+  var value: Int {
+    count.load(ordering: .acquiring)
+  }
 
-    func increment(recording threads: TestBox<Set<ThreadID>>) {
-        lock.lock()
-        count += 1
-        lock.unlock()
-        threads.with { $0.insert(ThreadID.current) }
-    }
+  func increment(recording threads: TestBox<Set<ThreadID>>) {
+    _ = count.wrappingAdd(1, ordering: .relaxed)
+    threads.with { $0.insert(ThreadID.current) }
+  }
 }

@@ -2,8 +2,6 @@
 
 Thread-affinity executors for Swift Concurrency: every job accepted by one of these executors runs on the same OS thread for the executor's whole lifetime. The bound thread can be created by the library, provided by the caller, or borrowed from an existing fixed-thread mechanism.
 
-Implementation baseline: Foundation's cross-platform `Thread` and `NSCondition` are used directly; nothing is rebuilt in-house to avoid the Foundation dependency.
-
 ## Scope
 
 | Type | Notes | Status |

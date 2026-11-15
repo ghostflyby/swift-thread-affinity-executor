@@ -26,51 +26,51 @@
 /// 7. **Lifetime validity** — while tasks or actors may still submit jobs,
 ///    the bound thread and the scheduling channel remain usable.
 public protocol ThreadBoundExecutor: SerialExecutor, TaskExecutor {
-    /// The OS thread this executor is bound to. Stable after publication.
-    var threadID: ThreadID { get }
+  /// The OS thread this executor is bound to. Stable after publication.
+  var threadID: ThreadID { get }
 }
 
 extension ThreadBoundExecutor {
-    /// Dynamic isolation check consumed by the Swift 6.2+ runtime after
-    /// regular executor-identity comparison fails.
-    ///
-    /// A synchronous caller running on the bound thread is isolated with
-    /// respect to this executor's jobs. Because the check inspects the
-    /// calling thread, it also holds when a *different* `ThreadBoundExecutor`
-    /// object is bound to the same OS thread.
-    ///
-    /// Apple SDKs expose the requirement un-gated, while the open-source
-    /// toolchain gates it behind `SwiftStdlib 6.2`; the platform split keeps
-    /// both builds warning- and error-free.
-    #if canImport(Darwin)
+  /// Dynamic isolation check consumed by the Swift 6.2+ runtime after
+  /// regular executor-identity comparison fails.
+  ///
+  /// A synchronous caller running on the bound thread is isolated with
+  /// respect to this executor's jobs. Because the check inspects the
+  /// calling thread, it also holds when a *different* `ThreadBoundExecutor`
+  /// object is bound to the same OS thread.
+  ///
+  /// Apple SDKs expose the requirement un-gated, while the open-source
+  /// toolchain gates it behind `SwiftStdlib 6.2`; the platform split keeps
+  /// both builds warning- and error-free.
+  #if canImport(Darwin)
     public func isIsolatingCurrentContext() -> Bool? {
-        threadID == ThreadID.current
+      threadID == ThreadID.current
     }
-    #else
+  #else
     @available(SwiftStdlib 6.2, *)
     public func isIsolatingCurrentContext() -> Bool? {
-        threadID == ThreadID.current
+      threadID == ThreadID.current
     }
-    #endif
+  #endif
 
-    /// Fallback isolation check for runtimes without
-    /// `isIsolatingCurrentContext()`.
-    public func checkIsolated() {
-        precondition(
-            threadID == ThreadID.current,
-            "Incorrect actor isolation: expected \(threadID), got \(ThreadID.current)"
-        )
-    }
+  /// Fallback isolation check for runtimes without
+  /// `isIsolatingCurrentContext()`.
+  public func checkIsolated() {
+    precondition(
+      threadID == ThreadID.current,
+      "Incorrect actor isolation: expected \(threadID), got \(ThreadID.current)"
+    )
+  }
 
-    /// Runs a job on the calling thread, which must be the bound thread.
-    func runJob(_ job: consuming UnownedJob) {
-        precondition(
-            threadID == ThreadID.current,
-            "Job executed off the executor's bound thread: expected \(threadID), got \(ThreadID.current)"
-        )
-        job.runSynchronously(
-            isolatedTo: asUnownedSerialExecutor(),
-            taskExecutor: asUnownedTaskExecutor()
-        )
-    }
+  /// Runs a job on the calling thread, which must be the bound thread.
+  func runJob(_ job: consuming UnownedJob) {
+    precondition(
+      threadID == ThreadID.current,
+      "Job executed off the executor's bound thread: expected \(threadID), got \(ThreadID.current)"
+    )
+    job.runSynchronously(
+      isolatedTo: asUnownedSerialExecutor(),
+      taskExecutor: asUnownedTaskExecutor()
+    )
+  }
 }
