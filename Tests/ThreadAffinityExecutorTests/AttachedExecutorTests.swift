@@ -14,13 +14,24 @@ import Testing
 
 @testable import ThreadAffinityExecutor
 
-/// Probes whether this process services the main queue at all. Synchronous
-/// helper because `DispatchSemaphore.wait` is unavailable from async
-/// contexts; the behavior under test is environment-conditional.
+/// Probes whether this process services the main queue on the main
+/// thread. The probed block records `isMainThread`: a runner parked in
+/// `dispatchMain()` diverts task-context main-queue posts to the
+/// cooperative pool (the signal still fires — from a pool thread), which
+/// `MainQueueDispatcher`'s handshake guard would trap on; treat that as
+/// the vacuous branch. Synchronous helper because `DispatchSemaphore.wait`
+/// is unavailable from async contexts.
 private func probeMainQueuePumped(timeout: TimeInterval) -> Bool {
   let pumped = DispatchSemaphore(value: 0)
-  DispatchQueue.main.async { pumped.signal() }
-  return pumped.wait(timeout: .now() + timeout) == .success
+  let onMainThread = TestBox<Bool?>(nil)
+  DispatchQueue.main.async {
+    onMainThread.set(Thread.isMainThread)
+    pumped.signal()
+  }
+  guard pumped.wait(timeout: .now() + timeout) == .success else {
+    return false
+  }
+  return onMainThread.get() == true
 }
 
 /// Deterministic `FixedThreadDispatcher` for tests: one Foundation thread
@@ -34,11 +45,13 @@ private final class TestPumpState: @unchecked Sendable {
   var finished = false
 }
 
-private final class TestPumpDispatcher: FixedThreadDispatcher, @unchecked Sendable {
+private final class TestPumpDispatcher: ThreadPumpDelegate, @unchecked Sendable {
   private let state = TestPumpState()
   private let thread: Thread
+  private let lifecycle: any ThreadLifecycleDelegate
 
-  init() {
+  init(lifecycle: any ThreadLifecycleDelegate = ClosureLifecycle()) {
+    self.lifecycle = lifecycle
     let state = self.state
     thread = Thread { [state] in
       state.condition.lock()
@@ -60,6 +73,14 @@ private final class TestPumpDispatcher: FixedThreadDispatcher, @unchecked Sendab
       state.condition.unlock()
     }
     thread.start()
+  }
+
+  func initialize() throws {
+    try lifecycle.initialize()
+  }
+
+  func finalize() {
+    lifecycle.finalize()
   }
 
   func post(_ work: @escaping @Sendable () -> Void) {
@@ -162,6 +183,9 @@ actor AttachedCounter {
     return
   }
 
+  // MainQueueDispatcher.initialize preconditions the main thread — attach
+  // returning proves the handshake landed there (the test process's main
+  // thread services the main queue through a run loop).
   let executor = try await AttachedThreadExecutor.attach(to: MainQueueDispatcher())
   let positive = await withTaskExecutorPreference(executor) {
     executor.isIsolatingCurrentContext()
@@ -174,12 +198,13 @@ private struct AttachInitializationFailed: Error {}
 /// Posted `initialize` runs exactly once on the target thread, before any
 /// job submitted to the attached executor.
 @Test func attachInitializeRunsOnTargetThreadBeforeJobs() async throws {
-  let dispatcher = TestPumpDispatcher()
   let initializerThreads = TestBox<[ThreadID]>([])
-  let executor = try await AttachedThreadExecutor.attach(
-    to: dispatcher,
-    initialize: { initializerThreads.with { $0.append(ThreadID.current) } }
+  let dispatcher = TestPumpDispatcher(
+    lifecycle: ClosureLifecycle {
+      initializerThreads.with { $0.append(ThreadID.current) }
+    }
   )
+  let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
   #expect(initializerThreads.get().count == 1)
 
   let jobThread = await withTaskExecutorPreference(executor) { ThreadID.current }
@@ -191,12 +216,11 @@ private struct AttachInitializationFailed: Error {}
 
 /// A posted `initialize` error fails the attach; no executor is published.
 @Test func attachInitializeFailureFailsAttach() async throws {
-  let dispatcher = TestPumpDispatcher()
+  let dispatcher = TestPumpDispatcher(
+    lifecycle: ClosureLifecycle(initialize: { throw AttachInitializationFailed() })
+  )
   await #expect(throws: AttachInitializationFailed.self) {
-    _ = try await AttachedThreadExecutor.attach(
-      to: dispatcher,
-      initialize: { throw AttachInitializationFailed() }
-    )
+    _ = try await AttachedThreadExecutor.attach(to: dispatcher)
   }
   dispatcher.stopAndJoin()
 }
@@ -204,12 +228,19 @@ private struct AttachInitializationFailed: Error {}
 /// A failed attach leaves the dispatcher reusable: a retry on the same
 /// dispatcher succeeds with a fresh handshake state.
 @Test func attachRetryAfterInitializeFailureSucceedsOnSameDispatcher() async throws {
-  let dispatcher = TestPumpDispatcher()
-  await #expect(throws: AttachInitializationFailed.self) {
-    _ = try await AttachedThreadExecutor.attach(
-      to: dispatcher,
-      initialize: { throw AttachInitializationFailed() }
+  let failingOnce = TestBox(true)
+  let dispatcher = TestPumpDispatcher(
+    lifecycle: ClosureLifecycle(
+      initialize: {
+        if failingOnce.get() {
+          failingOnce.set(false)
+          throw AttachInitializationFailed()
+        }
+      }
     )
+  )
+  await #expect(throws: AttachInitializationFailed.self) {
+    _ = try await AttachedThreadExecutor.attach(to: dispatcher)
   }
 
   let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
@@ -227,16 +258,17 @@ private func waitForSignal(_ semaphore: DispatchSemaphore) {
 /// thread, and joins: it returns only after finalize completed. The job is
 /// mid-flight when detach posts — FIFO must still run it first. Idempotent.
 @Test func detachRunsFinalizeAfterAllWorkAndJoins() async throws {
-  let dispatcher = TestPumpDispatcher()
   let order = TestBox<[String]>([])
   let finalThreads = TestBox<[ThreadID]>([])
-  let executor = try await AttachedThreadExecutor.attach(
-    to: dispatcher,
-    finalize: {
-      order.with { $0.append("finalize") }
-      finalThreads.with { $0.append(ThreadID.current) }
-    }
+  let dispatcher = TestPumpDispatcher(
+    lifecycle: ClosureLifecycle(
+      finalize: {
+        order.with { $0.append("finalize") }
+        finalThreads.with { $0.append(ThreadID.current) }
+      }
+    )
   )
+  let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
 
   let delivered = DispatchSemaphore(value: 0)
   let job = Task {
@@ -283,21 +315,22 @@ private func waitForSignal(_ semaphore: DispatchSemaphore) {
 /// completes, so deinit follows the backlog and FIFO still orders
 /// finalize after all work.
 @Test func abandonedExecutorPostsFinalizeOnDeinit() async throws {
-  let dispatcher = TestPumpDispatcher()
   let order = TestBox<[String]>([])
   let finalThreads = TestBox<[ThreadID]>([])
-  let running = DispatchSemaphore(value: 0)
-  var boundThreadID: ThreadID?
-  var pending: Task<Void, Never>?
-
-  do {
-    let executor = try await AttachedThreadExecutor.attach(
-      to: dispatcher,
+  let dispatcher = TestPumpDispatcher(
+    lifecycle: ClosureLifecycle(
       finalize: {
         order.with { $0.append("finalize") }
         finalThreads.with { $0.append(ThreadID.current) }
       }
     )
+  )
+  let running = DispatchSemaphore(value: 0)
+  var boundThreadID: ThreadID?
+  var pending: Task<Void, Never>?
+
+  do {
+    let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
     boundThreadID = executor.threadID
     pending = Task {
       await withTaskExecutorPreference(executor) {

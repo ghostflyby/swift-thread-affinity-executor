@@ -17,7 +17,8 @@ import Testing
 /// `post` uses CFRunLoopPerformBlock + CFRunLoopWakeUp (the documented
 /// cross-thread scheduling path); posted blocks run serially, in post
 /// order, on the host thread while it services the default mode.
-private final class RunLoopDispatcher: FixedThreadDispatcher, @unchecked Sendable {
+private final class RunLoopDispatcher: ThreadPumpDelegate, @unchecked Sendable {
+  private let lifecycle: any ThreadLifecycleDelegate
   // Semaphore handoff carries the happens-before (TestPumpState style):
   // runLoop is written before ready.signal() and read after ready.wait().
   // CFRunLoop's own scheduling APIs are thread-safe, which the region
@@ -51,7 +52,8 @@ private final class RunLoopDispatcher: FixedThreadDispatcher, @unchecked Sendabl
   private let runLoop: CFRunLoop
   private let thread: Thread
 
-  init() {
+  init(lifecycle: any ThreadLifecycleDelegate = ClosureLifecycle()) {
+    self.lifecycle = lifecycle
     let bootstrap = self.bootstrap
     thread = Thread {
       let runLoop = RunLoop.current
@@ -76,6 +78,14 @@ private final class RunLoopDispatcher: FixedThreadDispatcher, @unchecked Sendabl
     CFRunLoopWakeUp(runLoop)
   }
 
+  func initialize() throws {
+    try lifecycle.initialize()
+  }
+
+  func finalize() {
+    lifecycle.finalize()
+  }
+
   func stopAndJoin() {
     bootstrap.stop()
     bootstrap.finished.wait()
@@ -86,16 +96,17 @@ private final class RunLoopDispatcher: FixedThreadDispatcher, @unchecked Sendabl
 /// `initialize`, jobs on the host thread, `detach` running `finalize`
 /// after all accepted work — all through the RunLoop's own delivery.
 @Test func runLoopHostedAttachmentLifecycle() async throws {
-  let dispatcher = RunLoopDispatcher()
   let initializerThreads = TestBox<[ThreadID]>([])
   let jobThreads = TestBox<[ThreadID]>([])
   let finalThreads = TestBox<[ThreadID]>([])
-
-  let executor = try await AttachedThreadExecutor.attach(
-    to: dispatcher,
-    initialize: { initializerThreads.with { $0.append(ThreadID.current) } },
-    finalize: { finalThreads.with { $0.append(ThreadID.current) } }
+  let dispatcher = RunLoopDispatcher(
+    lifecycle: ClosureLifecycle(
+      initialize: { initializerThreads.with { $0.append(ThreadID.current) } },
+      finalize: { finalThreads.with { $0.append(ThreadID.current) } }
+    )
   )
+
+  let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
   #expect(initializerThreads.get().count == 1)
 
   await withTaskExecutorPreference(executor) {

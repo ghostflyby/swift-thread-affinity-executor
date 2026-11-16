@@ -21,25 +21,24 @@ import Synchronization
 /// the library neither creates nor stops the thread; when `run()` returns,
 /// control is back with the caller's code on that same thread.
 ///
-/// `finalize` is the pump's own exit hook, for bare pump usage (post/run
-/// without an attached executor): it runs once on the owner thread at
-/// `run()` exit, after the queue drained. Attachment finalization belongs
-/// to the attached executor's `detach()`, not here.
+/// As a `ThreadPumpDelegate` it carries one `lifecycle`; this pump anchors
+/// `finalize` at the first of the attachment's `detach()` or a bare
+/// pump's `run()` exit — whichever the usage reaches.
 public final class QueueDispatcher: FixedThreadDispatcher {
   private let producer: SharedQueueProducer<@Sendable () -> Void>
   private let consumer: QueueConsumer<@Sendable () -> Void>
   private let supervisor: QueueSupervisor<@Sendable () -> Void>
   private let ownerThreadID: ThreadID
-  private let finalize: @Sendable () -> Void
+  private let lifecycle: any ThreadLifecycleDelegate
   private let finalized = Atomic<Bool>(false)
 
-  public init(finalize: @escaping @Sendable () -> Void = {}) {
+  public init(lifecycle: any ThreadLifecycleDelegate = ClosureLifecycle()) {
     let ends = Queue<@Sendable () -> Void>().split()
     producer = ends.producer.share()
     consumer = ends.consumer
     supervisor = ends.supervisor
     ownerThreadID = ThreadID.current
-    self.finalize = finalize
+    self.lifecycle = lifecycle
   }
 
   public func post(_ work: @escaping @Sendable () -> Void) {
@@ -65,12 +64,7 @@ public final class QueueDispatcher: FixedThreadDispatcher {
     while let work = consumer.take() {
       work()
     }
-    // Pump exit: `finalize` runs once, on the owner thread.
-    if finalized.compareExchange(expected: false, desired: true, ordering: .acquiringAndReleasing)
-      .exchanged
-    {
-      finalize()
-    }
+    runLifecycleFinalize()
   }
 
   /// Requests that `run()` stop once the queue drained. Safe from any
@@ -78,5 +72,36 @@ public final class QueueDispatcher: FixedThreadDispatcher {
   /// request is dropped (`post` discards it).
   public func stop() {
     supervisor.close()
+  }
+
+  /// The lifecycle's finalize, exactly once, on the owner thread — shared
+  /// by `run()` exit and the delegate conformance.
+  private func runLifecycleFinalize() {
+    precondition(
+      ThreadID.current == ownerThreadID,
+      "QueueDispatcher lifecycle hooks run on the owner thread: expected \(ownerThreadID), got \(ThreadID.current)"
+    )
+    if finalized.compareExchange(expected: false, desired: true, ordering: .acquiringAndReleasing)
+      .exchanged
+    {
+      lifecycle.finalize()
+    }
+  }
+}
+
+extension QueueDispatcher: ThreadPumpDelegate {
+  /// Runs at the attach handshake on the owner thread — posted via `run()`
+  /// for classic attachment, synchronously for self-attach — before any
+  /// posted work.
+  public func initialize() throws {
+    precondition(
+      ThreadID.current == ownerThreadID,
+      "QueueDispatcher lifecycle hooks run on the owner thread: expected \(ownerThreadID), got \(ThreadID.current)"
+    )
+    try lifecycle.initialize()
+  }
+
+  public func finalize() {
+    runLifecycleFinalize()
   }
 }

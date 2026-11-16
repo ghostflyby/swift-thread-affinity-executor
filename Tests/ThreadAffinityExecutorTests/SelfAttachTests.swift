@@ -130,12 +130,13 @@ private struct SelfAttachInitializationFailed: Error {}
 
 /// Synchronous `initialize` runs on the attaching thread before any job.
 @Test func selfAttachInitializeRunsBeforeJobs() throws {
-  let dispatcher = QueueDispatcher()
   let initializerThreads = TestBox<[ThreadID]>([])
-  let executor = try AttachedThreadExecutor.attachOnCurrentThread(
-    to: dispatcher,
-    initialize: { initializerThreads.with { $0.append(ThreadID.current) } }
+  let dispatcher = QueueDispatcher(
+    lifecycle: ClosureLifecycle {
+      initializerThreads.with { $0.append(ThreadID.current) }
+    }
   )
+  let executor = try AttachedThreadExecutor.attachOnCurrentThread(to: dispatcher)
   #expect(initializerThreads.get() == [ThreadID.current])
   #expect(executor.threadID == ThreadID.current)
 
@@ -147,17 +148,22 @@ private struct SelfAttachInitializationFailed: Error {}
 @Test func selfAttachInitializeFailureThrows() {
   #expect(throws: SelfAttachInitializationFailed.self) {
     _ = try AttachedThreadExecutor.attachOnCurrentThread(
-      to: QueueDispatcher(),
-      initialize: { throw SelfAttachInitializationFailed() }
+      to: QueueDispatcher(
+        lifecycle: ClosureLifecycle(initialize: { throw SelfAttachInitializationFailed() })
+      )
     )
   }
 }
 
-/// Pump `finalize` runs once at `run()` exit, on the owner thread — even
-/// when `run()` is entered again afterwards.
+/// The pump's `finalize` fires exactly once regardless of which anchor
+/// reaches it first: the discarded executor's deinit backstop posts it
+/// before `run()`, the first `run()` drains it in the work loop, and the
+/// run-exit guard no-ops; re-entering `run()` stays a no-op.
 @Test func pumpFinalizeRunsOnceAtRunExitOnOwnerThread() throws {
   let finalThreads = TestBox<[ThreadID]>([])
-  let dispatcher = QueueDispatcher(finalize: { finalThreads.with { $0.append(ThreadID.current) } })
+  let dispatcher = QueueDispatcher(
+    lifecycle: ClosureLifecycle(finalize: { finalThreads.with { $0.append(ThreadID.current) } })
+  )
   _ = try AttachedThreadExecutor.attachOnCurrentThread(to: dispatcher)
 
   dispatcher.stop()
@@ -187,15 +193,18 @@ private struct SelfAttachInitializationFailed: Error {}
 /// through the pump; FIFO runs it after all accepted work on the owner
 /// thread, and `run()` drains it before returning.
 @Test func selfAttachedDetachRunsFinalizeThroughPump() throws {
-  let dispatcher = QueueDispatcher()
   let finalThreads = TestBox<[ThreadID]>([])
-  let executor = try AttachedThreadExecutor.attachOnCurrentThread(
-    to: dispatcher,
-    finalize: {
-      finalThreads.with { $0.append(ThreadID.current) }
-      dispatcher.stop()  // the test pump's exit
-    }
+  let pumpBox = TestBox<QueueDispatcher?>(nil)
+  let dispatcher = QueueDispatcher(
+    lifecycle: ClosureLifecycle(
+      finalize: {
+        finalThreads.with { $0.append(ThreadID.current) }
+        pumpBox.get()?.stop()  // the test pump's exit
+      }
+    )
   )
+  pumpBox.set(dispatcher)
+  let executor = try AttachedThreadExecutor.attachOnCurrentThread(to: dispatcher)
 
   let detached = DispatchSemaphore(value: 0)
   let stopper = Thread {

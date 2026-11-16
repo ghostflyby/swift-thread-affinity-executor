@@ -3,7 +3,7 @@
 //  ThreadAffinityExecutor
 //
 //  Handshake state for attached executors: the target thread publishes
-//  its `ThreadID` and the outcome of the on-thread `initialize` closure
+//  its `ThreadID` and the outcome of the on-thread `initialize` hook
 //  exactly once via the dispatcher's `post` entry; `attach` awaits it
 //  without ever blocking the host thread.
 //

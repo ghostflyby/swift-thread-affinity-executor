@@ -15,20 +15,14 @@ import Foundation
 /// The executor subclasses `Thread` directly. Jobs travel through the
 /// generic blocking queue from the `BlockingQueue` library; a one-shot
 /// handshake carries the worker's `ThreadID` and the outcome of the
-/// on-thread `initialize` closure from the bound thread to the constructor.
+/// on-thread `initialize` hook from the bound thread to the constructor.
 ///
 /// Lifecycle:
 ///
-/// - `initialize` runs exactly once on the bound thread, before the first
-///   job — for thread-local state, thread-affine native runtimes and other
-///   create-thread-equals-use-thread requirements. An error it throws is
-///   rethrown by `init`: the failed executor is never published and the
-///   worker thread exits. Cleanup after a failed `initialize` is the
-///   closure's own responsibility (e.g. `defer`).
-/// - `finalize` runs on the bound thread after the queue drained, before
-///   the thread exits — only on the success path; it is skipped when
-///   `initialize` failed. `shutdown()` returns only after `finalize`
-///   completed.
+/// - The `lifecycle` hooks run on the bound thread; the dedicated modality
+///   rethrows a failed `initialize` from `init` (the executor is never
+///   published, the worker exits, `finalize` is skipped), and
+///   `shutdown()` returns only after `finalize` completed.
 /// - `init` returns only after `initialize` succeeded — the instance
 ///   accepts jobs the moment construction completes.
 /// - The running `Thread` is retained by Foundation until `main()` returns,
@@ -50,33 +44,29 @@ public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchec
   private let supervisor: QueueSupervisor<UnownedJob>
   private let handshake = StartupHandshake()
   private let exitLatch = ExitLatch()
-  private let initialize: @Sendable () throws -> Void
-  private let finalize: @Sendable () -> Void
+  private let lifecycle: any ThreadLifecycleDelegate
 
-  /// Creates the worker thread, runs `initialize` on it and waits for the
-  /// startup handshake.
+  /// Creates the worker thread, runs the lifecycle's `initialize` on it
+  /// and waits for the startup handshake.
   ///
   /// - Parameters:
   ///   - name: Best-effort OS thread name; diagnostic only.
-  ///   - initialize: Runs once on the bound thread before the first job;
-  ///     an error it throws fails construction and the worker exits.
-  ///   - finalize: Runs once on the bound thread after the queue drained,
-  ///     before the thread exits; never runs when `initialize` failed.
+  ///   - lifecycle: hooks per `ThreadLifecycleDelegate`; the dedicated
+  ///     modality anchors them at worker-thread entry/exit, with
+  ///     `shutdown()` joining the exit epilogue.
   ///
   /// `Foundation.Thread.start()` has no failure return, so a thread that
   /// cannot be spawned (resource exhaustion) blocks this initializer —
   /// accepted in exchange for not re-implementing thread management.
   public init(
     name: String? = nil,
-    initialize: @escaping @Sendable () throws -> Void = {},
-    finalize: @escaping @Sendable () -> Void = {}
+    lifecycle: any ThreadLifecycleDelegate = ClosureLifecycle()
   ) throws {
     let ends = Queue<UnownedJob>().split()
     self.producer = ends.producer.share()
     self.consumer = ends.consumer
     self.supervisor = ends.supervisor
-    self.initialize = initialize
-    self.finalize = finalize
+    self.lifecycle = lifecycle
     super.init()
     if let name {
       self.name = name
@@ -88,11 +78,12 @@ public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchec
 
   /// The worker's service loop: initializes, then blocks on the queue and
   /// executes one job per wake-up until the queue is closed and fully
-  /// drained; `finalize` is the last code to run on the thread.
+  /// drained; the lifecycle's `finalize` is the last code to run on the
+  /// thread.
   public override func main() {
     let threadID = ThreadID.current
     do {
-      try initialize()
+      try lifecycle.initialize()
       handshake.publishSuccess(threadID)
     } catch {
       handshake.publishFailure(error)
@@ -102,7 +93,7 @@ public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchec
     while let job = consumer.take() {
       runJob(job)
     }
-    finalize()
+    lifecycle.finalize()
     exitLatch.signal()
   }
 

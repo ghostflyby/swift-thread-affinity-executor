@@ -40,12 +40,16 @@ import Testing
 
 // MARK: - Initialization model
 
-/// `initialize` runs exactly once on the bound thread, before any job.
+/// The lifecycle's `initialize` runs exactly once on the bound thread,
+/// before any job.
 @Test func initializeRunsOnceBeforeFirstJobOnBoundThread() async throws {
   let initializerThreads = TestBox<[ThreadID]>([])
-  let executor = try DedicatedThreadExecutor(name: "tae-init") {
-    initializerThreads.with { $0.append(ThreadID.current) }
-  }
+  let executor = try DedicatedThreadExecutor(
+    name: "tae-init",
+    lifecycle: ClosureLifecycle {
+      initializerThreads.with { $0.append(ThreadID.current) }
+    }
+  )
   #expect(initializerThreads.get().count == 1)
 
   let jobThread = await withTaskExecutorPreference(executor) {
@@ -65,21 +69,26 @@ private struct InitializationFailed: Error {}
   #expect(throws: InitializationFailed.self) {
     _ = try DedicatedThreadExecutor(
       name: "tae-init-fail",
-      initialize: { throw InitializationFailed() },
-      finalize: { finalized.set(true) }
+      lifecycle: ClosureLifecycle(
+        initialize: { throw InitializationFailed() },
+        finalize: { finalized.set(true) }
+      )
     )
   }
   #expect(finalized.get() == false)
 }
 
-/// `finalize` runs on the bound thread after the queue drained.
+/// The lifecycle's `finalize` runs on the bound thread after the queue
+/// drained.
 @Test func finalizeRunsAfterDrainOnBoundThread() async throws {
   let jobThread = TestBox<ThreadID?>(nil)
   let finalThread = TestBox<ThreadID?>(nil)
-  let executor = try DedicatedThreadExecutor(name: "tae-finalize") {
-  } finalize: {
-    finalThread.set(ThreadID.current)
-  }
+  let executor = try DedicatedThreadExecutor(
+    name: "tae-finalize",
+    lifecycle: ClosureLifecycle(
+      finalize: { finalThread.set(ThreadID.current) }
+    )
+  )
 
   await withTaskExecutorPreference(executor) {
     jobThread.set(ThreadID.current)
