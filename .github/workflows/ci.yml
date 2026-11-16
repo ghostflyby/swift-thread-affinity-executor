@@ -49,9 +49,23 @@ jobs:
         run: swift --version
       - name: Build
         run: swift build -c ${{ matrix.config }}
-      - name: Test (macOS, line-buffered)
+      - name: Test (macOS, diagnostic)
         if: runner.os == 'macOS'
-        run: script -q /dev/null swift test -c ${{ matrix.config }}
+        shell: bash
+        run: |
+          set -u
+          script -q /dev/null swift test -c ${{ matrix.config }} > "$RUNNER_TEMP/test.log" 2>&1 &
+          runner=$!
+          sleep 75
+          for pid in $(pgrep -x swiftpm-testing); do
+            echo "=== sample $pid ==="
+            sample "$pid" 5 -file "$RUNNER_TEMP/sample-$pid.txt" || true
+            cat "$RUNNER_TEMP/sample-$pid.txt" || true
+          done
+          echo "=== test log ==="
+          cat "$RUNNER_TEMP/test.log" || true
+          kill "$runner" 2>/dev/null || true
+          wait "$runner" 2>/dev/null || true
       - name: Test
         if: runner.os == 'Linux'
         run: swift test -c ${{ matrix.config }}
