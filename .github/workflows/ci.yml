@@ -25,7 +25,7 @@ jobs:
   test:
     name: ${{ matrix.os }} · ${{ matrix.config }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 30
     # The Linux paths do not compile yet: Foundation.Thread cannot be
     # subclassed (swift-corelibs-foundation) and gettid is not exposed by
     # the Glibc module. Keep the legs visible without blocking on the port.
@@ -49,33 +49,7 @@ jobs:
         run: swift --version
       - name: Build
         run: swift build -c ${{ matrix.config }}
-      - name: Test (macOS, diagnostic)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -u
-          script -q /dev/null swift test -c ${{ matrix.config }} > "$RUNNER_TEMP/test.log" 2>&1 &
-          runner=$!
-          for _ in $(seq 1 240); do
-            if pgrep -f 'ThreadAffinityExecutorPackageTests' >/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-          sleep 40
-          echo "=== processes ==="
-          ps -axo pid=,comm=,args= | grep -i -E 'xctest|swiftpm|PackageTests' || true
-          for pid in $(pgrep -f 'ThreadAffinityExecutorPackageTests' || true); do
-            echo "=== sample $pid ==="
-            sample "$pid" 3 -file "$RUNNER_TEMP/sample-$pid.txt" || true
-            cat "$RUNNER_TEMP/sample-$pid.txt" || true
-          done
-          echo "=== test log ==="
-          cat "$RUNNER_TEMP/test.log" || true
-          kill "$runner" 2>/dev/null || true
-          wait "$runner" 2>/dev/null || true
       - name: Test
-        if: runner.os == 'Linux'
         run: swift test -c ${{ matrix.config }}
 
   # Swift 6 toolchains are not in setup-swift's Windows catalog (v2 stops at
