@@ -79,6 +79,12 @@ public final class MigratingThreadExecutor: SerialExecutor, TaskExecutor, @unche
     orchestrator.current
   }
 
+  /// Jobs accepted by the serving generation and not yet taken. Internal;
+  /// diagnostics and tests use it to observe a settled backlog.
+  var pendingJobCount: Int {
+    orchestrator.pendingJobCount
+  }
+
   public func enqueue(_ job: consuming ExecutorJob) {
     let pending = UnownedJob(job)
     orchestrator.withTarget { target in
@@ -278,6 +284,13 @@ private final class GenerationQueue: @unchecked Sendable {
     condition.unlock()
     return nil
   }
+
+  /// Jobs accepted by this generation and not yet taken.
+  var count: Int {
+    condition.lock()
+    defer { condition.unlock() }
+    return jobs.count
+  }
 }
 
 /// Routing and generation bookkeeping, guarded by one condition: the
@@ -300,6 +313,15 @@ private final class Orchestrator: @unchecked Sendable {
       preconditionFailure("current generation read before publication")
     }
     return currentInfo
+  }
+
+  /// Jobs accepted by the current target and not yet taken. Holds the
+  /// routing lock while sampling the generation queue; the lock order is
+  /// the same as enqueue/retarget (routing, then generation).
+  var pendingJobCount: Int {
+    condition.lock()
+    defer { condition.unlock() }
+    return target?.count ?? 0
   }
 
   func withTarget(_ body: (GenerationQueue?) -> Void) {

@@ -227,32 +227,57 @@ actor MigrationCounter {
   let firstThread = executor.current.threadID
   let seen = TestBox<Set<Int>>([])
   let observedThreads = TestBox<[ThreadID]>([])
-  let allEnqueued = DispatchSemaphore(value: 0)
   let releasePump = DispatchSemaphore(value: 0)
 
-  // The producer task itself runs on the executor: it enqueues the whole
-  // group while holding the pump, so the migration starts against a full
-  // backlog. The pump stays parked until the successor is ready.
-  let producer = Task {
+  // One job holds the old pump. The producer's children below therefore
+  // cannot run; they accumulate in the old generation's queue.
+  let pumpHeld = DispatchSemaphore(value: 0)
+  let blocker = Task {
     await withTaskExecutorPreference(executor) {
-      await withTaskGroup(of: Void.self) { group in
-        for index in 0..<jobCount {
-          group.addTask {
+      pumpHeld.signal()
+      blockingWait(releasePump)
+    }
+  }
+  await waitForSignal(pumpHeld)
+
+  // The producer is not bound to the executor: each child task hops onto
+  // the executor on its own, so adding the group does not require the
+  // pump that the blocker is holding.
+  let producer = Task {
+    await withTaskGroup(of: Void.self) { group in
+      for index in 0..<jobCount {
+        group.addTask {
+          await withTaskExecutorPreference(executor) {
             seen.with { _ = $0.insert(index) }
             observedThreads.with { $0.append(ThreadID.current) }
           }
         }
-        allEnqueued.signal()
-        blockingWait(releasePump)
       }
     }
   }
-  await waitForSignal(allEnqueued)
-  defer { releasePump.signal() }
 
-  // Start the handoff and release the pump once the successor's
-  // initialize ran: the backlog then drains while the migration is in
-  // flight.
+  // Wait until every child was accepted by the old generation. Without
+  // this barrier the runtime may enqueue some children only after the
+  // retarget, which would make the "first record is old" assertion racy.
+  var backlog = executor.pendingJobCount
+  var attempts = 0
+  while backlog < jobCount && attempts < 1_000 {
+    try await Task.sleep(for: .milliseconds(10))
+    backlog = executor.pendingJobCount
+    attempts += 1
+  }
+  guard backlog == jobCount else {
+    releasePump.signal()
+    await blocker.value
+    await executor.terminate()
+    first.stop()
+    second.stop()
+    Issue.record("backlog did not settle: \(backlog) of \(jobCount) jobs queued")
+    return
+  }
+
+  // Start the handoff while the backlog is parked, then release the pump
+  // once the successor's initialize ran: the old generation drains first.
   let successorReady = DispatchSemaphore(value: 0)
   let successor = ClosureGenerationDelegate(
     to: second,
@@ -263,6 +288,7 @@ actor MigrationCounter {
   }
   await waitForSignal(successorReady)
   releasePump.signal()
+  await blocker.value
   try await migration.value
   await producer.value
 
