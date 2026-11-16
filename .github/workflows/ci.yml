@@ -57,15 +57,15 @@ jobs:
           script -q /dev/null swift test -c ${{ matrix.config }} > "$RUNNER_TEMP/test.log" 2>&1 &
           runner=$!
           for _ in $(seq 1 240); do
-            if pgrep -x swiftpm-testing >/dev/null || pgrep -f 'PackageTests[.]xctest' >/dev/null; then
+            if pgrep -f 'ThreadAffinityExecutorPackageTests' >/dev/null; then
               break
             fi
             sleep 1
           done
-          sleep 45
+          sleep 40
           echo "=== processes ==="
-          ps -axo pid=,comm=,args= | rg -i 'xctest|swiftpm|PackageTests' || true
-          for pid in $(pgrep -x swiftpm-testing || pgrep -f 'PackageTests[.]xctest' || true); do
+          ps -axo pid=,comm=,args= | grep -i -E 'xctest|swiftpm|PackageTests' || true
+          for pid in $(pgrep -f 'ThreadAffinityExecutorPackageTests' || true); do
             echo "=== sample $pid ==="
             sample "$pid" 3 -file "$RUNNER_TEMP/sample-$pid.txt" || true
             cat "$RUNNER_TEMP/sample-$pid.txt" || true
