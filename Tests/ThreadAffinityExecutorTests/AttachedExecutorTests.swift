@@ -193,6 +193,45 @@ actor AttachedCounter {
   #expect(positive == true)
 }
 
+/// Bidirectional isolation compatibility between MainActor context and an
+/// executor bound to the main thread: a job on the executor can
+/// `MainActor.assumeIsolated` (the check follows the thread), and
+/// MainActor-isolated code can `assumeIsolated` onto an actor bound to
+/// the executor (identity differs; the runtime falls back to the
+/// thread-based check). Sync helpers because both checks are unavailable
+/// from async contexts lexically.
+private func mainActorAssumptionFromSyncContext() -> Int {
+  MainActor.assumeIsolated { 42 }
+}
+
+private func counterAssumptionFromSyncContext(_ counter: AttachedCounter) -> Int {
+  counter.assumeIsolated { site in
+    site.next()
+  }
+}
+
+@Test func mainThreadExecutorIsolationIsBidirectionalWithMainActor() async throws {
+  guard probeMainQueuePumped(timeout: 1.0) else {
+    return
+  }
+
+  let executor = try await AttachedThreadExecutor.attach(to: MainQueueDispatcher())
+  let counter = AttachedCounter(executor: executor)
+
+  // B: MainActor context (delivered on the main thread) -> actor bound to
+  // the executor.
+  let fromMainActor = await MainActor.run {
+    counterAssumptionFromSyncContext(counter)
+  }
+  #expect(fromMainActor == 1)
+
+  // A: job on the executor -> MainActor.assumeIsolated.
+  let fromExecutorJob = await withTaskExecutorPreference(executor) {
+    mainActorAssumptionFromSyncContext()
+  }
+  #expect(fromExecutorJob == 42)
+}
+
 private struct AttachInitializationFailed: Error {}
 
 /// Posted `initialize` runs exactly once on the target thread, before any

@@ -31,7 +31,8 @@ public protocol FixedThreadDispatcher: Sendable {
 /// posts onto the cooperative pool, so executor jobs would execute off
 /// the main thread. The `ThreadPumpDelegate` conformance's `initialize`
 /// traps at handshake time when the attachment did not land on the main
-/// thread.
+/// thread. With the requirement satisfied, isolation checks are
+/// bidirectionally compatible with `MainActor` context.
 public struct MainQueueDispatcher: FixedThreadDispatcher {
   public init() {}
 
