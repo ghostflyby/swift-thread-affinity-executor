@@ -15,6 +15,14 @@
   import WinSDK
 #endif
 
+#if canImport(Glibc) || canImport(Musl)
+  /// The kernel TID API exists in libc, but the Swift Glibc/Musl modules do
+  /// not expose `gettid()` on every toolchain. Declare the libc symbol
+  /// directly; the function is resolved at link time.
+  @_silgen_name("gettid")
+  private func libcGettid() -> Int32
+#endif
+
 /// A value that identifies an OS thread **of this process, while that thread
 /// is alive**.
 ///
@@ -45,8 +53,9 @@ public struct ThreadID: Sendable, Hashable, CustomStringConvertible {
       precondition(status == 0, "pthread_threadid_np failed with status \(status)")
       return ThreadID(rawValue: identifier)
     #elseif canImport(Glibc) || canImport(Musl)
-      // Kernel TID of the calling thread (glibc >= 2.30, musl >= 1.2.1).
-      return ThreadID(rawValue: UInt64(Int64(gettid())))
+      // Kernel TID of the calling thread. `gettid` is declared above because
+      // the Swift module does not expose it on every toolchain.
+      return ThreadID(rawValue: UInt64(Int64(libcGettid())))
     #elseif canImport(WinSDK)
       return ThreadID(rawValue: UInt64(GetCurrentThreadId()))
     #endif

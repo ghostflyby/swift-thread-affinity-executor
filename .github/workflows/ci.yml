@@ -26,10 +26,8 @@ jobs:
     name: ${{ matrix.os }} · ${{ matrix.config }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    # The Linux paths do not compile yet: Foundation.Thread cannot be
-    # subclassed (swift-corelibs-foundation) and gettid is not exposed by
-    # the Glibc module. Keep the legs visible without blocking on the port.
-    continue-on-error: ${{ matrix.os == 'ubuntu-24.04' }}
+    # Linux is blocking: the dedicated executor owns a Thread(block:)
+    # instead of subclassing Thread, and ThreadID declares gettid directly.
     strategy:
       fail-fast: false
       matrix:
@@ -54,12 +52,11 @@ jobs:
 
   # Swift 6 toolchains are not in setup-swift's Windows catalog (v2 stops at
   # 5.6.3 for Windows), so Windows uses the community action on the VS 2022
-  # image. Experimental until the Windows test paths are verified.
+  # image. The dedicated executor is closure-based, so this leg is blocking.
   windows:
-    name: windows-2022 (experimental)
+    name: windows-2022
     runs-on: windows-2022
     timeout-minutes: 30
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Set up Swift

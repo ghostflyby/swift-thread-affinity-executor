@@ -41,19 +41,11 @@ extension ThreadBoundExecutor {
   /// calling thread, it also holds when a *different* `ThreadBoundExecutor`
   /// object is bound to the same OS thread.
   ///
-  /// Apple SDKs expose the requirement un-gated, while the open-source
-  /// toolchain gates it behind `SwiftStdlib 6.2`; the platform split keeps
-  /// both builds warning- and error-free.
-  #if canImport(Darwin)
-    public func isIsolatingCurrentContext() -> Bool? {
-      threadID == ThreadID.current
-    }
-  #else
-    @available(SwiftStdlib 6.2, *)
-    public func isIsolatingCurrentContext() -> Bool? {
-      threadID == ThreadID.current
-    }
-  #endif
+  /// The package requires Swift 6.2, so the requirement is available on
+  /// every supported platform.
+  public func isIsolatingCurrentContext() -> Bool? {
+    threadID == ThreadID.current
+  }
 
   /// Fallback isolation check for runtimes without
   /// `isIsolatingCurrentContext()`.
