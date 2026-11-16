@@ -19,9 +19,11 @@ import Testing
 /// `dispatchMain()` diverts task-context main-queue posts to the
 /// cooperative pool (the signal still fires — from a pool thread), which
 /// `MainQueueDispatcher`'s handshake guard would trap on; treat that as
-/// the vacuous branch. Synchronous helper because `DispatchSemaphore.wait`
-/// is unavailable from async contexts.
-private func probeMainQueuePumped(timeout: TimeInterval) -> Bool {
+/// the vacuous branch.
+///
+/// Synchronous probe; call it through the async wrapper so the wait does
+/// not occupy a cooperative thread while tests run in parallel.
+private func probeMainQueuePumpedSync(timeout: TimeInterval) -> Bool {
   let pumped = DispatchSemaphore(value: 0)
   let onMainThread = TestBox<Bool?>(nil)
   DispatchQueue.main.async {
@@ -32,6 +34,17 @@ private func probeMainQueuePumped(timeout: TimeInterval) -> Bool {
     return false
   }
   return onMainThread.get() == true
+}
+
+/// Async wrapper that keeps the blocking probe off the cooperative pool:
+/// under parallel test execution, blocking a cooperative thread can keep the
+/// work it waits for from ever being scheduled.
+private func probeMainQueuePumped(timeout: TimeInterval) async -> Bool {
+  await withCheckedContinuation { continuation in
+    DispatchQueue.global().async {
+      continuation.resume(returning: probeMainQueuePumpedSync(timeout: timeout))
+    }
+  }
 }
 
 /// Deterministic `FixedThreadDispatcher` for tests: one Foundation thread
@@ -179,7 +192,7 @@ actor AttachedCounter {
 // MARK: - Main queue path (environment-conditional)
 
 @Test func mainQueueDispatcherIsAValidFixedThreadDispatcher() async throws {
-  guard probeMainQueuePumped(timeout: 1.0) else {
+  guard await probeMainQueuePumped(timeout: 1.0) else {
     return
   }
 
@@ -211,7 +224,7 @@ private func counterAssumptionFromSyncContext(_ counter: AttachedCounter) -> Int
 }
 
 @Test func mainThreadExecutorIsolationIsBidirectionalWithMainActor() async throws {
-  guard probeMainQueuePumped(timeout: 1.0) else {
+  guard await probeMainQueuePumped(timeout: 1.0) else {
     return
   }
 
@@ -287,10 +300,17 @@ private struct AttachInitializationFailed: Error {}
   dispatcher.stopAndJoin()
 }
 
-/// Synchronous helper — `DispatchSemaphore.wait` is unavailable from async
-/// contexts; the block is bounded (the pump services the signal).
-private func waitForSignal(_ semaphore: DispatchSemaphore) {
-  semaphore.wait()
+/// `DispatchSemaphore.wait` is unavailable from async contexts; wait on a
+/// global queue so the block does not occupy a cooperative thread. Blocking
+/// one under parallel test execution can keep the executor job that signals
+/// the semaphore from ever being scheduled.
+private func waitForSignal(_ semaphore: DispatchSemaphore) async {
+  await withCheckedContinuation { continuation in
+    DispatchQueue.global().async {
+      semaphore.wait()
+      continuation.resume()
+    }
+  }
 }
 
 /// `detach()` posts `finalize` after all accepted work, on the bound
@@ -316,7 +336,8 @@ private func waitForSignal(_ semaphore: DispatchSemaphore) {
       delivered.signal()
     }
   }
-  waitForSignal(delivered)  // the job is executing: its post already precedes the finalize post
+  // The job is executing: its post already precedes the finalize post.
+  await waitForSignal(delivered)
 
   executor.detach()
   executor.detach()  // idempotent: finalize ran once, both calls returned
@@ -377,7 +398,7 @@ private func waitForSignal(_ semaphore: DispatchSemaphore) {
         running.signal()
       }
     }
-    waitForSignal(running)
+    await waitForSignal(running)
   }
 
   await pending!.value
