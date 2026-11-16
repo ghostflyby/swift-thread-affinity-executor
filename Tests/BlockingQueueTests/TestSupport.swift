@@ -3,7 +3,20 @@
 //  BlockingQueueTests
 //
 
+import Dispatch
 import Synchronization
+
+/// Waits for `semaphore` without occupying a cooperative thread. Under the
+/// default parallel test scheduler, blocking a cooperative thread can keep
+/// the work that signals it from ever being scheduled.
+func awaitSignal(_ semaphore: DispatchSemaphore) async {
+  await withCheckedContinuation { continuation in
+    DispatchQueue.global().async {
+      semaphore.wait()
+      continuation.resume()
+    }
+  }
+}
 
 /// Mutex-guarded box for synchronizing test observations.
 final class Box<T: Sendable>: Sendable {

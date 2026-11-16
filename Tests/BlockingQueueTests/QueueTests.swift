@@ -31,16 +31,22 @@ import Testing
   let ends = Queue<String>().split()
   let consumer = ends.consumer.share()
 
-  let taker = Task.detached {
-    consumer.take()
+  // The blocking take gets its own thread: a blocked cooperative thread can
+  // starve the pool that this test needs to make progress.
+  let result = Box<String?>(nil)
+  let taken = DispatchSemaphore(value: 0)
+  let taker = Thread {
+    result.set(consumer.take())
+    taken.signal()
   }
+  taker.start()
   // the queue is empty and open, so the taker can only still be blocked
   try? await Task.sleep(for: .milliseconds(50))
 
   let accepted = ends.producer.enqueue("hello")
   #expect(accepted)
-  let value = await taker.value
-  #expect(value == "hello")
+  await awaitSignal(taken)
+  #expect(result.get() == "hello")
 
   release(ends.producer)
 }
@@ -159,17 +165,21 @@ import Testing
   ends.producer.enqueue(7)
   ends.supervisor.close()
 
+  // waitUntilSealed blocks; run it off the cooperative pool.
   let supervisor = ends.supervisor
-  let waiter = Task.detached {
+  let sealed = DispatchSemaphore(value: 0)
+  let waiter = Thread {
     supervisor.waitUntilSealed()
+    sealed.signal()
   }
+  waiter.start()
 
   let element = ends.consumer.take()
   #expect(element == 7)
   let drained = ends.consumer.take()
   #expect(drained == nil)
 
-  await waiter.value
+  await awaitSignal(sealed)
   #expect(ends.supervisor.isSealed)
 
   release(ends.producer)
@@ -187,30 +197,33 @@ import Testing
   let total = producerCount * perProducer
   let collector = Collector()
 
-  await withTaskGroup(of: Void.self) { group in
-    // two takers compete on the shared consumer end
-    for _ in 0..<2 {
-      group.addTask {
-        while let value = consumer.take() {
-          collector.append(value)
-        }
+  // Blocking takers get dedicated threads; the cooperative pool stays
+  // available for the producer tasks whose completion closes the queue.
+  let takersDone = DispatchSemaphore(value: 0)
+  for _ in 0..<2 {
+    let taker = Thread {
+      while let value = consumer.take() {
+        collector.append(value)
       }
+      takersDone.signal()
     }
-    // producers run to completion, then production closes
-    group.addTask {
-      await withTaskGroup(of: Void.self) { producers in
-        for p in 0..<producerCount {
-          producers.addTask {
-            for i in 0..<perProducer {
-              producer.enqueue(p * perProducer + i)
-            }
-          }
-        }
-      }
-      producer.close()
-    }
+    taker.start()
   }
 
+  await withTaskGroup(of: Void.self) { producers in
+    for p in 0..<producerCount {
+      producers.addTask {
+        for i in 0..<perProducer {
+          producer.enqueue(p * perProducer + i)
+        }
+      }
+    }
+  }
+  producer.close()
+
+  // Both takers return nil once production is closed and the queue drained.
+  await awaitSignal(takersDone)
+  await awaitSignal(takersDone)
   supervisor.waitUntilSealed()
 
   let received = collector.snapshot()
