@@ -218,3 +218,51 @@ private struct SelfAttachInitializationFailed: Error {}
 
   #expect(finalThreads.get() == [ThreadID.current])
 }
+
+/// `post` reports rejection once the pump stopped instead of silently
+/// queueing work that never runs.
+@Test func postAfterStopReturnsFalse() {
+  let dispatcher = QueueDispatcher()
+  dispatcher.stop()
+  #expect(dispatcher.post {} == false)
+  dispatcher.run()
+}
+
+#if canImport(Darwin)
+  private final class AutoreleaseProbe: NSObject {
+    private let onDeinit: @Sendable () -> Void
+
+    init(onDeinit: @escaping @Sendable () -> Void) {
+      self.onDeinit = onDeinit
+    }
+
+    deinit {
+      onDeinit()
+    }
+  }
+
+  /// Each pump work item drains its own autoreleased objects before the
+  /// next work item starts.
+  @Test func pumpDrainsAutoreleasedObjectsPerWorkItem() {
+    let order = TestBox<[String]>([])
+    let dispatcher = QueueDispatcher()
+
+    dispatcher.post {
+      let probe = AutoreleaseProbe {
+        order.with { $0.append("deinit") }
+      }
+      // `passRetained` + `autorelease` puts the probe in the thread's
+      // current pool; the pool's drain owns the release that deinitializes
+      // it after this work item returns.
+      _ = Unmanaged.passRetained(probe).autorelease()
+      order.with { $0.append("first") }
+    }
+    dispatcher.post {
+      order.with { $0.append("second") }
+    }
+    dispatcher.stop()
+    dispatcher.run()
+
+    #expect(order.get() == ["first", "deinit", "second"])
+  }
+#endif

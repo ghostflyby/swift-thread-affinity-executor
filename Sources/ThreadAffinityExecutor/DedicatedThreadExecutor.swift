@@ -91,7 +91,9 @@ public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchec
     }
 
     while let job = consumer.take() {
-      runJob(job)
+      withPerWorkAutoreleasePool {
+        runJob(job)
+      }
     }
     lifecycle.finalize()
     exitLatch.signal()

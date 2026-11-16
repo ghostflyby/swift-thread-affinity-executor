@@ -73,9 +73,11 @@ private final class RunLoopDispatcher: ThreadPumpDelegate, @unchecked Sendable {
     runLoop = bootstrap.runLoop!
   }
 
-  func post(_ work: @escaping @Sendable () -> Void) {
+  @discardableResult
+  func post(_ work: @escaping @Sendable () -> Void) -> Bool {
     CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue, work)
     CFRunLoopWakeUp(runLoop)
+    return true
   }
 
   func initialize() throws {

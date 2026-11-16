@@ -5,14 +5,19 @@
 //  One executor identity spanning a sequence of bound-thread generations.
 //
 
+import DequeModule
 import Foundation
 
 /// Migration control failures.
-public enum MigrationError: Error, Sendable {
+public enum MigrationError: Error, Sendable, Equatable {
   /// Another migration is already in progress.
   case busy
   /// The executor is terminated.
   case terminated
+  /// The pump rejected a required post. A rejected handshake leaves the
+  /// current generation serving; a rejected serving post terminates the
+  /// executor after the successor was already published.
+  case pumpUnavailable
 }
 
 /// An executor whose bound thread changes through explicit migration
@@ -26,11 +31,17 @@ public enum MigrationError: Error, Sendable {
 /// across the whole chain: the successor handshakes and initializes first
 /// (transactionally — failure aborts the migration with the current
 /// generation still serving), then the old generation drains and
-/// finalizes, then the successor opens. Jobs enqueued during the handoff
-/// are routed to the successor and run after everything already accepted.
+/// finalizes, then the successor starts serving. The successor's serving
+/// loop is posted after the old drain, so the successor pump is not
+/// blocked while the old generation finishes. Jobs enqueued during the
+/// handoff are routed to the successor and run after everything already
+/// accepted.
 ///
 /// Each generation's pump must service posts and belong to this executor
-/// exclusively until the next handoff (`QueueDispatcher` qualifies).
+/// exclusively until the next handoff (`QueueDispatcher` qualifies). This
+/// includes the serving post made after the old generation finalized; a
+/// pump that stops accepting posts between the handshake and that post
+/// terminates the executor (see `MigrationError.pumpUnavailable`).
 ///
 /// Deliberately not a `ThreadBoundExecutor`: here thread affinity is
 /// generation-scoped, not executor-scoped.
@@ -50,6 +61,9 @@ public final class MigratingThreadExecutor: SerialExecutor, TaskExecutor, @unche
   /// the pump's thread, so it must be serviced. The ceremony runs
   /// detached, so no continuation of the attaching task routes through
   /// this executor.
+  ///
+  /// - Throws: `MigrationError.pumpUnavailable` when the pump rejects the
+  ///   handshake or serving post, or the pump's `initialize` error.
   public static func attach(
     to pump: any ThreadGenerationDelegate
   ) async throws -> MigratingThreadExecutor {
@@ -63,6 +77,12 @@ public final class MigratingThreadExecutor: SerialExecutor, TaskExecutor, @unche
   /// The serving generation; switches only at handoff barriers.
   public var current: Generation {
     orchestrator.current
+  }
+
+  /// Jobs accepted by the serving generation and not yet taken. Internal;
+  /// diagnostics and tests use it to observe a settled backlog.
+  var pendingJobCount: Int {
+    orchestrator.pendingJobCount
   }
 
   public func enqueue(_ job: consuming ExecutorJob) {
@@ -83,9 +103,20 @@ public final class MigratingThreadExecutor: SerialExecutor, TaskExecutor, @unche
   /// executor is safe — the caller resumes on the new generation.
   ///
   /// - Throws: `MigrationError.busy` while another migration is in
-  ///   flight, `MigrationError.terminated` after `terminate()`, and the
-  ///   delegate's `initialize` error on a failed successor handshake. A
-  ///   pump that never services its handshake leaves this call pending.
+  ///   flight, `MigrationError.terminated` after `terminate()`, the
+  ///   delegate's `initialize` error on a failed successor handshake, and
+  ///   `MigrationError.pumpUnavailable` when the pump rejects the
+  ///   handshake or serving post. A rejected serving post terminates the
+  ///   executor: the successor was already published, so the caller must
+  ///   discard it after `terminate()`. A pump that never services its
+  ///   handshake leaves this call pending.
+  /// - Precondition: `pump` must not share its fixed thread or queue with
+  ///   the currently serving pump. Migrating to the same pump — or to a
+  ///   different wrapper around the same thread — deadlocks: the
+  ///   handshake post queues behind the old serving loop, which exits only
+  ///   after retarget seals its queue, and retarget waits for the
+  ///   handshake. The handshake does not block the successor's thread
+  ///   while the old generation drains; the serving loop is posted later.
   public func migrate(to pump: any ThreadGenerationDelegate) async throws {
     try await Task.detached { [self] in
       try await handoff(to: pump)
@@ -99,6 +130,15 @@ public final class MigratingThreadExecutor: SerialExecutor, TaskExecutor, @unche
   /// gets no signal — and a handoff racing another migration is ignored;
   /// a pump that never services its handshake leaves the migration
   /// pending.
+  ///
+  /// - Precondition: `pump` must not share its fixed thread or queue with
+  ///   the currently serving pump. The same-thread handoff deadlocks: the
+  ///   handshake post queues behind the old serving loop, which exits only
+  ///   after retarget seals its queue, and retarget waits for the
+  ///   handshake. The handshake does not block the successor's thread
+  ///   while the old generation drains; the serving loop is posted later.
+  ///   A rejected serving post terminates the executor silently, like a
+  ///   swallowed `MigrationError.pumpUnavailable`.
   public func handOver(to pump: any ThreadGenerationDelegate) {
     precondition(
       ThreadID.current == orchestrator.current.threadID,
@@ -131,41 +171,65 @@ public final class MigratingThreadExecutor: SerialExecutor, TaskExecutor, @unche
 
   /// The transactional handoff: successor handshake and `initialize`
   /// first (abortable), then routing flips and the old generation seals
-  /// atomically (no enqueued job falls between), then publish and open.
+  /// atomically (no enqueued job falls between), then publish. The
+  /// successor's serving loop is posted only after the old generation
+  /// finalized, so the successor pump is never parked on the old drain.
   private func handoff(to pump: any ThreadGenerationDelegate) async throws {
     let (epoch, oldGeneration) = try orchestrator.beginMigration()
     let generation = GenerationQueue()
     let handshake = AttachedThreadState()
 
-    pump.post { [self, generation, handshake, pump, epoch] in
+    let handshakePosted = pump.post { [pump, handshake, epoch] in
       let info = Generation(epoch: epoch, threadID: ThreadID.current)
       do {
         try pump.initialize(info)
         handshake.fulfillSuccess(info.threadID)
       } catch {
         handshake.fulfillFailure(error)
-        return  // aborted handoff: this closure exits, the pump is unused
       }
-      generation.waitOpened()
-      while let job = generation.take() {
-        run(job, on: info.threadID)
-      }
-      pump.finalize(info)
-      generation.latch.signal()
+    }
+    guard handshakePosted else {
+      orchestrator.abortMigration()
+      throw MigrationError.pumpUnavailable
     }
 
+    let successorThreadID: ThreadID
     do {
-      let successorThreadID = try await handshake.awaitReady()
-      orchestrator.retarget(generation, sealing: oldGeneration)
-      if let oldGeneration {
-        await awaitLatch(oldGeneration.latch)
-      }
-      orchestrator.publish(Generation(epoch: epoch, threadID: successorThreadID))
+      successorThreadID = try await handshake.awaitReady()
     } catch {
       orchestrator.abortMigration()
       throw error
     }
-    generation.open()
+
+    orchestrator.retarget(generation, sealing: oldGeneration)
+    if let oldGeneration {
+      await awaitLatch(oldGeneration.latch)
+    }
+    orchestrator.publish(Generation(epoch: epoch, threadID: successorThreadID))
+    let info = Generation(epoch: epoch, threadID: successorThreadID)
+    let servingPosted = pump.post { [self, generation, pump, info] in
+      while let job = generation.take() {
+        // The pump may wrap this whole closure in an autorelease pool
+        // (QueueDispatcher does); this per-job pool is what releases each
+        // job's autoreleased objects before the next job starts.
+        withPerWorkAutoreleasePool {
+          run(job, on: info.threadID)
+        }
+      }
+      pump.finalize(info)
+      generation.latch.signal()
+    }
+    guard servingPosted else {
+      // The successor is already published but can never serve. Release
+      // terminate()'s latch and mark the executor terminated so later
+      // enqueues drop and later terminate()/migrate() calls return
+      // instead of waiting for a serving loop that will never be posted.
+      generation.close()
+      generation.latch.signal()
+      orchestrator.terminateBroken()
+      throw MigrationError.pumpUnavailable
+    }
+    orchestrator.finishMigration()
   }
 
   private func run(_ job: UnownedJob, on threadID: ThreadID) {
@@ -180,13 +244,12 @@ public final class MigratingThreadExecutor: SerialExecutor, TaskExecutor, @unche
   }
 }
 
-/// Handoff-gated job channel for one generation: enqueue/close/open/take
-/// under one condition; `latch` signals drain-and-finalize completion.
+/// Job channel for one generation: enqueue/close/take under one
+/// condition; `latch` signals drain-and-finalize completion.
 private final class GenerationQueue: @unchecked Sendable {
   private let condition = NSCondition()
-  private var jobs: [UnownedJob] = []
+  private var jobs: Deque<UnownedJob> = []
   private var closed = false
-  private var opened = false
   let latch = ExitLatch()
 
   func enqueue(_ job: UnownedJob) -> Bool {
@@ -208,38 +271,25 @@ private final class GenerationQueue: @unchecked Sendable {
     condition.broadcast()
   }
 
-  /// Successor generations start gated: the ceremony opens them only
-  /// after the predecessor sealed. A close also releases the gate — a
-  /// generation sealed before opening finalizes immediately (no jobs
-  /// ran).
-  func waitOpened() {
-    condition.lock()
-    while !opened && !closed {
-      condition.wait()
-    }
-    condition.unlock()
-  }
-
-  func open() {
-    condition.lock()
-    opened = true
-    condition.unlock()
-    condition.broadcast()
-  }
-
   /// Blocking take; nil seals this generation (closed and drained).
   func take() -> UnownedJob? {
     condition.lock()
     while jobs.isEmpty && !closed {
       condition.wait()
     }
-    if !jobs.isEmpty {
-      let job = jobs.removeFirst()
+    if let job = jobs.popFirst() {
       condition.unlock()
       return job
     }
     condition.unlock()
     return nil
+  }
+
+  /// Jobs accepted by this generation and not yet taken.
+  var count: Int {
+    condition.lock()
+    defer { condition.unlock() }
+    return jobs.count
   }
 }
 
@@ -263,6 +313,15 @@ private final class Orchestrator: @unchecked Sendable {
       preconditionFailure("current generation read before publication")
     }
     return currentInfo
+  }
+
+  /// Jobs accepted by the current target and not yet taken. Holds the
+  /// routing lock while sampling the generation queue; the lock order is
+  /// the same as enqueue/retarget (routing, then generation).
+  var pendingJobCount: Int {
+    condition.lock()
+    defer { condition.unlock() }
+    return target?.count ?? 0
   }
 
   func withTarget(_ body: (GenerationQueue?) -> Void) {
@@ -298,6 +357,15 @@ private final class Orchestrator: @unchecked Sendable {
     condition.lock()
     defer { condition.unlock() }
     currentInfo = info
+  }
+
+  /// Marks the published successor's serving post as accepted: a new
+  /// migration or a termination may now proceed. Kept separate from
+  /// `publish` so that neither can observe the successor before its
+  /// serving loop was posted.
+  func finishMigration() {
+    condition.lock()
+    defer { condition.unlock() }
     migrating = false
     condition.broadcast()  // wakes a terminate() waiting out this migration
   }
@@ -305,6 +373,21 @@ private final class Orchestrator: @unchecked Sendable {
   func abortMigration() {
     condition.lock()
     defer { condition.unlock() }
+    migrating = false
+    condition.broadcast()
+  }
+
+  /// Marks the executor terminated after a committed handoff lost its
+  /// serving post. The successor was already published, so there is no
+  /// previous generation to fall back to; clearing routing makes later
+  /// enqueues drop and lets a subsequent `terminate()` finish immediately.
+  /// The caller signals the generation's latch separately so a
+  /// `terminate()` already waiting on it can return.
+  func terminateBroken() {
+    condition.lock()
+    defer { condition.unlock() }
+    terminated = true
+    target = nil
     migrating = false
     condition.broadcast()
   }
@@ -329,8 +412,9 @@ private final class Orchestrator: @unchecked Sendable {
   }
 }
 
-/// Awaits a latch without parking a cooperative thread on the (possibly
-/// long) drain.
+/// Awaits a latch on a detached task: the caller's cooperative thread is
+/// not parked, but the detached task blocks one global executor thread for
+/// the duration of the (possibly long) drain.
 private func awaitLatch(_ latch: ExitLatch) async {
   await Task.detached {
     latch.wait()

@@ -41,8 +41,11 @@ public final class QueueDispatcher: FixedThreadDispatcher {
     self.lifecycle = lifecycle
   }
 
-  public func post(_ work: @escaping @Sendable () -> Void) {
-    _ = producer.enqueue(work)
+  /// Returns false once `stop()` was requested or no consumer remains;
+  /// the work is then not scheduled.
+  @discardableResult
+  public func post(_ work: @escaping @Sendable () -> Void) -> Bool {
+    producer.enqueue(work)
   }
 
   /// Occupies the calling thread, running posted work until `stop()` was
@@ -62,14 +65,16 @@ public final class QueueDispatcher: FixedThreadDispatcher {
     )
 
     while let work = consumer.take() {
-      work()
+      withPerWorkAutoreleasePool {
+        work()
+      }
     }
     runLifecycleFinalize()
   }
 
   /// Requests that `run()` stop once the queue drained. Safe from any
   /// thread, including from inside posted work. Work arriving after this
-  /// request is dropped (`post` discards it).
+  /// request is dropped (`post` returns false).
   public func stop() {
     supervisor.close()
   }

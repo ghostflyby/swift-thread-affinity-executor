@@ -54,6 +54,7 @@ private func probeMainQueuePumped(timeout: TimeInterval) async -> Bool {
 private final class TestPumpState: @unchecked Sendable {
   let condition = NSCondition()
   var queue: [@Sendable () -> Void] = []
+  var postCount = 0
   var stopRequested = false
   var finished = false
 }
@@ -62,9 +63,14 @@ private final class TestPumpDispatcher: ThreadPumpDelegate, @unchecked Sendable 
   private let state = TestPumpState()
   private let thread: Thread
   private let lifecycle: any ThreadLifecycleDelegate
+  private let rejectPostsAfter: Int?
 
-  init(lifecycle: any ThreadLifecycleDelegate = ClosureLifecycle()) {
+  init(
+    lifecycle: any ThreadLifecycleDelegate = ClosureLifecycle(),
+    rejectPostsAfter: Int? = nil
+  ) {
     self.lifecycle = lifecycle
+    self.rejectPostsAfter = rejectPostsAfter
     let state = self.state
     thread = Thread { [state] in
       state.condition.lock()
@@ -96,11 +102,19 @@ private final class TestPumpDispatcher: ThreadPumpDelegate, @unchecked Sendable 
     lifecycle.finalize()
   }
 
-  func post(_ work: @escaping @Sendable () -> Void) {
+  @discardableResult
+  func post(_ work: @escaping @Sendable () -> Void) -> Bool {
     state.condition.lock()
+    state.postCount += 1
+    let accepted = rejectPostsAfter.map { state.postCount <= $0 } ?? true
+    if !accepted || state.stopRequested {
+      state.condition.unlock()
+      return false
+    }
     state.queue.append(work)
     state.condition.unlock()
     state.condition.signal()
+    return true
   }
 
   func stopAndJoin() {
@@ -300,22 +314,57 @@ private struct AttachInitializationFailed: Error {}
   dispatcher.stopAndJoin()
 }
 
-/// `DispatchSemaphore.wait` is unavailable from async contexts; wait on a
-/// global queue so the block does not occupy a cooperative thread. Blocking
-/// one under parallel test execution can keep the executor job that signals
-/// the semaphore from ever being scheduled.
-private func waitForSignal(_ semaphore: DispatchSemaphore) async {
-  await withCheckedContinuation { continuation in
-    DispatchQueue.global().async {
-      semaphore.wait()
-      continuation.resume()
-    }
+/// A pump that rejects the handshake post fails the attach instead of
+/// leaving the attaching task suspended.
+@Test func attachedAttachThrowsWhenPumpRejectsHandshake() async {
+  let dispatcher = TestPumpDispatcher(rejectPostsAfter: 0)
+  await #expect(throws: AttachError.pumpUnavailable) {
+    _ = try await AttachedThreadExecutor.attach(to: dispatcher)
   }
+  dispatcher.stopAndJoin()
+}
+
+/// A pump that accepts the handshake but rejects the finalize post makes
+/// `detach()` return false instead of blocking forever; finalize did not run.
+@Test func detachReturnsFalseWhenPumpRejectsFinalizePost() async throws {
+  let finalCount = TestBox(0)
+  let dispatcher = TestPumpDispatcher(
+    lifecycle: ClosureLifecycle(finalize: { finalCount.with { $0 += 1 } }),
+    rejectPostsAfter: 1
+  )
+  let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
+  #expect(executor.detach() == false)
+  #expect(finalCount.get() == 0)
+  dispatcher.stopAndJoin()
+}
+
+/// Concurrent `detach()` calls settle on one claimed finalize; the others
+/// join its outcome.
+@Test func concurrentDetachesRunFinalizeOnce() async throws {
+  let finalCount = TestBox(0)
+  let dispatcher = TestPumpDispatcher(
+    lifecycle: ClosureLifecycle(finalize: { finalCount.with { $0 += 1 } })
+  )
+  let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
+
+  await withTaskGroup(of: Bool.self) { group in
+    for _ in 0..<8 {
+      group.addTask { executor.detach() }
+    }
+    var results: [Bool] = []
+    for await result in group {
+      results.append(result)
+    }
+    #expect(results == Array(repeating: true, count: 8))
+  }
+  #expect(finalCount.get() == 1)
+  dispatcher.stopAndJoin()
 }
 
 /// `detach()` posts `finalize` after all accepted work, on the bound
-/// thread, and joins: it returns only after finalize completed. The job is
-/// mid-flight when detach posts — FIFO must still run it first. Idempotent.
+/// thread, and joins: it returns `true` only after finalize completed (or
+/// `false` when the pump rejected the post). The job is mid-flight when
+/// detach posts — FIFO must still run it first. Idempotent.
 @Test func detachRunsFinalizeAfterAllWorkAndJoins() async throws {
   let order = TestBox<[String]>([])
   let finalThreads = TestBox<[ThreadID]>([])

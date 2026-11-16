@@ -17,7 +17,9 @@ public protocol ThreadLifecycleDelegate: Sendable {
   /// On the bound thread, at the controllable exit point: `shutdown()`
   /// for a dedicated executor, `detach()` for an attachment, a pump's
   /// `run()` exit for bare pump usage. Runs after all accepted work; a
-  /// modality without such a point never runs it.
+  /// modality without such a point never runs it, and an attachment whose
+  /// pump rejects the finalize post does not run it either (`detach()`
+  /// returns `false`).
   func finalize()
 }
 

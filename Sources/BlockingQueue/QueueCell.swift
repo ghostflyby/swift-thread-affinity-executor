@@ -4,7 +4,9 @@
 //
 //  Internal shared state behind every queue end and supervisor: the
 //  element deque plus lifecycle flags and endpoint refcounts, guarded by a
-//  single NSCondition.
+//  single NSCondition. Producers, consumers and `waitUntilSealed` all wait
+//  on that one condition, so the wake policy counts each class: a single
+//  signal is safe only when the class being woken is the only one waiting.
 //
 
 import DequeModule
@@ -18,6 +20,43 @@ final class QueueCell<Element: ~Copyable>: @unchecked Sendable {
   var sealed = false
   var producerCount = 0
   var consumerCount = 0
+  var waitingProducers = 0
+  var waitingConsumers = 0
+  var waitingSealed = 0
+
+  /// How many waiters a state change must wake. `one` is valid only when
+  /// the target class is the sole waiter class on the shared condition.
+  private enum WakeDecision {
+    case none
+    case one
+    case all
+  }
+
+  /// Callers hold the lock.
+  private func consumerWakeLocked() -> WakeDecision {
+    guard waitingConsumers > 0 else { return .none }
+    return waitingProducers == 0 && waitingSealed == 0 ? .one : .all
+  }
+
+  /// Callers hold the lock.
+  private func producerWakeLocked() -> WakeDecision {
+    guard waitingProducers > 0 else { return .none }
+    return waitingConsumers == 0 && waitingSealed == 0 ? .one : .all
+  }
+
+  /// Callers hold the lock and apply the decision before unlocking. A
+  /// signal sent after unlocking could be consumed by a waiter of another
+  /// class that registered in the gap; a broadcast is safe either way.
+  private func apply(_ decision: WakeDecision) {
+    switch decision {
+    case .none:
+      break
+    case .one:
+      condition.signal()
+    case .all:
+      condition.broadcast()
+    }
+  }
 
   init(capacity: Int?) {
     self.capacity = capacity
@@ -37,8 +76,8 @@ final class QueueCell<Element: ~Copyable>: @unchecked Sendable {
       return false
     }
     elements.append(element)
+    apply(consumerWakeLocked())
     condition.unlock()
-    condition.broadcast()
     return true
   }
 
@@ -46,8 +85,10 @@ final class QueueCell<Element: ~Copyable>: @unchecked Sendable {
   /// sealed, closed or missing consumers.
   func enqueueBlocking(_ element: consuming Element) -> Bool {
     condition.lock()
+    waitingProducers += 1
     while true {
       if sealed || closed || consumerCount == 0 {
+        waitingProducers -= 1
         condition.unlock()
         return false
       }
@@ -56,8 +97,9 @@ final class QueueCell<Element: ~Copyable>: @unchecked Sendable {
         continue
       }
       elements.append(element)
+      waitingProducers -= 1
+      apply(consumerWakeLocked())
       condition.unlock()
-      condition.broadcast()
       return true
     }
   }
@@ -66,17 +108,23 @@ final class QueueCell<Element: ~Copyable>: @unchecked Sendable {
   /// critical section.
   func take() -> sending Element? {
     condition.lock()
+    waitingConsumers += 1
     while elements.isEmpty && !closed && !sealed {
       condition.wait()
     }
+    waitingConsumers -= 1
     if let element = elements.popFirst() {
+      // A freed bounded slot wakes one blocked producer; other waiter
+      // classes on the shared condition turn that into a broadcast.
+      if capacity != nil {
+        apply(producerWakeLocked())
+      }
       condition.unlock()
-      condition.broadcast()
       return element
     }
     sealed = true
-    condition.unlock()
     condition.broadcast()
+    condition.unlock()
     return nil
   }
 
@@ -123,9 +171,11 @@ final class QueueCell<Element: ~Copyable>: @unchecked Sendable {
 
   func waitUntilSealed() {
     condition.lock()
+    waitingSealed += 1
     while !sealed {
       condition.wait()
     }
+    waitingSealed -= 1
     condition.unlock()
   }
 
