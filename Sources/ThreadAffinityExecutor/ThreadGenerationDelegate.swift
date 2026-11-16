@@ -21,8 +21,8 @@ public protocol ThreadGenerationDelegate: FixedThreadDispatcher {
   func initialize(_ generation: MigratingThreadExecutor.Generation) throws
 
   /// On the generation's thread, after its last job — before the next
-  /// handoff's successor opens, or a final termination. Transactional
-  /// handoffs run this after the successor's `initialize`.
+  /// handoff's successor starts serving, or a final termination.
+  /// Transactional handoffs run this after the successor's `initialize`.
   func finalize(_ generation: MigratingThreadExecutor.Generation)
 }
 
@@ -48,7 +48,8 @@ public struct ClosureGenerationDelegate: ThreadGenerationDelegate {
     self.finalizeHook = finalize
   }
 
-  public func post(_ work: @escaping @Sendable () -> Void) {
+  @discardableResult
+  public func post(_ work: @escaping @Sendable () -> Void) -> Bool {
     pump.post(work)
   }
 

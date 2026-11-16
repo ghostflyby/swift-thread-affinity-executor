@@ -18,7 +18,19 @@ import Synchronization
 /// whole lifetime; otherwise the type cannot satisfy `ThreadBoundExecutor`.
 public protocol FixedThreadDispatcher: Sendable {
   /// Runs `work` on the dispatcher's fixed OS thread.
-  func post(_ work: @escaping @Sendable () -> Void)
+  ///
+  /// Returns `false` when the dispatcher no longer accepts work (for
+  /// example, a stopped pump); the work is then not scheduled. A `true`
+  /// return only means the dispatcher accepted the work — the pump's
+  /// thread must still service accepted posts.
+  @discardableResult
+  func post(_ work: @escaping @Sendable () -> Void) -> Bool
+}
+
+/// Attachment failures.
+public enum AttachError: Error, Sendable, Equatable {
+  /// The pump rejected the handshake post; no attachment was established.
+  case pumpUnavailable
 }
 
 /// Adapter posting onto `DispatchQueue.main`, whose target is the process
@@ -36,10 +48,12 @@ public protocol FixedThreadDispatcher: Sendable {
 public struct MainQueueDispatcher: FixedThreadDispatcher {
   public init() {}
 
-  public func post(_ work: @escaping @Sendable () -> Void) {
+  @discardableResult
+  public func post(_ work: @escaping @Sendable () -> Void) -> Bool {
     DispatchQueue.main.async {
       work()
     }
+    return true
   }
 }
 
@@ -76,9 +90,10 @@ extension MainQueueDispatcher: ThreadPumpDelegate {
 ///
 /// The pump's `finalize` runs at attach termination, delivered through the
 /// same pump: `detach()` posts it — FIFO puts it after all accepted work,
-/// on the bound thread — and joins its completion. Abandoning an executor
-/// without detaching posts it best-effort from deinit, un-joined; a pump
-/// that no longer accepts posts drops it silently.
+/// on the bound thread — and joins its completion. `detach()` returns
+/// `false` when the pump rejected that post, so `finalize` did not run.
+/// Abandoning an executor without detaching posts it best-effort from
+/// deinit, un-joined; a pump that no longer accepts posts drops it silently.
 public final class AttachedThreadExecutor: ThreadBoundExecutor {
   private let pump: any ThreadPumpDelegate
   private let state = AttachedThreadState()
@@ -96,17 +111,23 @@ public final class AttachedThreadExecutor: ThreadBoundExecutor {
   /// The pump's `initialize` runs as the first posted work — the executor
   /// accepts jobs only once this call returned. The pump's `finalize`
   /// runs at attach termination (`detach()`).
+  ///
+  /// - Throws: `AttachError.pumpUnavailable` when the pump rejects the
+  ///   handshake post, or the pump's `initialize` error.
   public static func attach(
     to pump: any ThreadPumpDelegate
   ) async throws -> AttachedThreadExecutor {
     let executor = AttachedThreadExecutor(pump: pump)
-    pump.post { [state = executor.state, pump] in
+    let posted = pump.post { [state = executor.state, pump] in
       do {
         try pump.initialize()
         state.fulfillSuccess(ThreadID.current)
       } catch {
         state.fulfillFailure(error)
       }
+    }
+    guard posted else {
+      throw AttachError.pumpUnavailable
     }
     _ = try await executor.state.awaitReady()
     executor.established.store(true, ordering: .releasing)
@@ -138,37 +159,43 @@ public final class AttachedThreadExecutor: ThreadBoundExecutor {
       return  // attachment terminated: the job falls into the drop window
     }
     let pending = UnownedJob(job)
-    pump.post { [self] in
+    _ = pump.post { [self] in
       runJob(pending)
     }
   }
 
   /// Terminates the attachment: posts `finalize` through the same
   /// dispatcher — FIFO puts it after all accepted work, on the bound
-  /// thread — and blocks until it completed. Idempotent: a second call
-  /// returns once the first detach's finalize finished.
+  /// thread — and blocks until the claim settles. Idempotent: a second
+  /// call joins the first claim's outcome.
   ///
   /// - Precondition: called off the bound thread (waiting from inside the
   ///   pump deadlocks), after producers stopped submitting, and while the
-  ///   pump still accepts posts — a dropped post cannot be observed
-  ///   (`post` returns `Void`), so the join would block forever; detach
-  ///   before stopping the pump.
+  ///   pump still services accepted posts. A pump that rejects the post
+  ///   is reported by a `false` return; a pump that accepts it but never
+  ///   runs it still blocks the join — detach before stopping the pump.
+  /// - Returns: `true` when the posted `finalize` ran; `false` when the
+  ///   pump rejected the post, so `finalize` did not run.
   /// - Jobs enqueued after `detach()` began are dropped; one racing past
   ///   the drop guard may instead be posted after the finalize post and
   ///   run after `finalize` — the producers-stopped precondition covers
   ///   this window.
-  public func detach() {
+  @discardableResult
+  public func detach() -> Bool {
     precondition(
       ThreadID.current != threadID,
       "detach() must not be called from the executor's bound thread"
     )
     if detachGate.claim() {
-      pump.post { [pump, detachGate] in
+      let posted = pump.post { [pump, detachGate] in
         pump.finalize()
-        detachGate.signalDone()
+        detachGate.signalDone(true)
+      }
+      if !posted {
+        detachGate.signalDone(false)
       }
     }
-    detachGate.waitDone()
+    return detachGate.waitDone()
   }
 
   deinit {
@@ -181,8 +208,9 @@ public final class AttachedThreadExecutor: ThreadBoundExecutor {
       return
     }
     let pump = self.pump
-    pump.post {
+    _ = pump.post { [pump, detachGate] in
       pump.finalize()
+      detachGate.signalDone(true)
     }
   }
 }

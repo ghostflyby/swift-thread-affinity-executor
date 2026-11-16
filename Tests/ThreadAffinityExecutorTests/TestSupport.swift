@@ -3,9 +3,32 @@
 //  ThreadAffinityExecutorTests
 //
 
+import Dispatch
+import Foundation
 import Synchronization
 
 @testable import ThreadAffinityExecutor
+
+/// Awaits `semaphore` without parking a cooperative test thread.
+func waitForSignal(_ semaphore: DispatchSemaphore) async {
+  await withCheckedContinuation { continuation in
+    DispatchQueue.global().async {
+      semaphore.wait()
+      continuation.resume()
+    }
+  }
+}
+
+/// Timed variant for tests that must distinguish "never woke" from a slow
+/// wake-up without parking a cooperative thread.
+func waitForSignal(_ semaphore: DispatchSemaphore, timeout: TimeInterval) async -> Bool {
+  await withCheckedContinuation { continuation in
+    DispatchQueue.global().async {
+      let result = semaphore.wait(timeout: .now() + timeout)
+      continuation.resume(returning: result == .success)
+    }
+  }
+}
 
 /// A mutex-guarded box for synchronizing test fixtures.
 final class TestBox<T>: Sendable where T: Sendable {

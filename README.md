@@ -79,12 +79,14 @@ swift build
 swift test
 ```
 
-Requires a Swift 6.2+ toolchain. Deployment floors: macOS 15 / iOS 18 / tvOS 18 / watchOS 11 / visionOS 2. Library products: `ThreadAffinityExecutor`, `BlockingQueue`. The Linux and Windows paths are written but so far only compiled and tested on macOS.
+Requires a Swift 6.2+ toolchain. Deployment floors: macOS 15 / iOS 18 / tvOS 18 / watchOS 11 / visionOS 2. Library products: `ThreadAffinityExecutor`, `BlockingQueue`. The Linux and Windows paths are written but not yet verified; the Linux CI leg currently does not compile (`Foundation.Thread` cannot be subclassed on swift-corelibs-foundation and `gettid` is not exposed by the Glibc module).
 
 ## Known tradeoffs
 
 - `Foundation.Thread.start()` has no failure return; if the thread cannot be spawned (resource exhaustion) the synchronous initializer blocks.
 - An executor attached to the main thread via `MainQueueDispatcher` shares the thread with `MainActor` but is not the same executor identity and does not replace it.
+- `MigratingThreadExecutor.migrate(to:)` and `handOver(to:)` require a successor pump whose fixed thread or queue is independent of the currently serving pump — a different wrapper around the same thread or queue still deadlocks. The handshake post queues behind the old serving loop, which exits only after retarget seals its queue, and retarget waits for the handshake. The handshake itself no longer blocks the successor's thread while the old generation drains; the serving loop is posted after the old finalize.
+- `FixedThreadDispatcher.post` returns `false` once the pump stops accepting work. Attachment and migration handshakes surface that as `AttachError.pumpUnavailable` / `MigrationError.pumpUnavailable`; `detach()` returns `false` when the finalize post is rejected instead of blocking forever. A pump that accepts a post but never runs it still leaves the join pending.
 
 ## License
 

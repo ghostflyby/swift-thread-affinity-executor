@@ -257,3 +257,69 @@ import Testing
   #expect(drained == nil)
   release(ends.consumer)
 }
+
+/// A sealed-waiter on the shared condition must not consume the wake-up
+/// meant for a blocked consumer: the queue only uses a single signal when
+/// the consumer class is the sole waiter class.
+@Test func enqueueWakesConsumerDespiteSealedWaiter() {
+  let ends = BoundedQueue<Int>(capacity: 2).split()
+  let producer = ends.producer.share()
+  let consumer = ends.consumer.share()
+  let supervisor = ends.supervisor
+
+  let took = DispatchSemaphore(value: 0)
+  let taker = Thread {
+    _ = consumer.take()
+    took.signal()
+  }
+  let sealed = DispatchSemaphore(value: 0)
+  let sealedWaiter = Thread {
+    supervisor.waitUntilSealed()
+    sealed.signal()
+  }
+  taker.start()
+  sealedWaiter.start()
+  Thread.sleep(forTimeInterval: 0.05)
+
+  #expect(producer.enqueue(1))
+  #expect(took.wait(timeout: .now() + 2) == .success)
+
+  supervisor.close()
+  _ = consumer.take()
+  #expect(sealed.wait(timeout: .now() + 2) == .success)
+  producer.close()
+}
+
+/// Symmetric case: a blocked producer must be woken even when a sealed
+/// waiter shares the condition, so a freed bounded slot is not lost.
+@Test func takeWakesProducerDespiteSealedWaiter() {
+  let ends = BoundedQueue<Int>(capacity: 1).split()
+  let producer = ends.producer.share()
+  let consumer = ends.consumer.share()
+  let supervisor = ends.supervisor
+
+  #expect(producer.enqueue(1))
+
+  let produced = DispatchSemaphore(value: 0)
+  let producerThread = Thread {
+    _ = producer.enqueueBlocking(2)
+    produced.signal()
+  }
+  let sealed = DispatchSemaphore(value: 0)
+  let sealedWaiter = Thread {
+    supervisor.waitUntilSealed()
+    sealed.signal()
+  }
+  producerThread.start()
+  sealedWaiter.start()
+  Thread.sleep(forTimeInterval: 0.05)
+
+  #expect(consumer.take() == 1)
+  #expect(produced.wait(timeout: .now() + 2) == .success)
+
+  supervisor.close()
+  #expect(consumer.take() == 2)
+  #expect(consumer.take() == nil)
+  #expect(sealed.wait(timeout: .now() + 2) == .success)
+  producer.close()
+}
