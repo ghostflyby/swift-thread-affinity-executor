@@ -50,7 +50,7 @@ jobs:
       - name: Build
         run: swift build -c ${{ matrix.config }}
       - name: Test
-        run: swift test -c ${{ matrix.config }} --no-parallel
+        run: swift test -c ${{ matrix.config }}
 
   # Swift 6 toolchains are not in setup-swift's Windows catalog (v2 stops at
   # 5.6.3 for Windows), so Windows uses the community action on the VS 2022
@@ -72,7 +72,7 @@ jobs:
       - name: Build
         run: swift build
       - name: Test
-        run: swift test --no-parallel
+        run: swift test
 
   # Passes locally, but the sanitized test binary produces no output and does
   # not finish on the hosted macOS runner (fresh runs hang after the build).
@@ -88,7 +88,7 @@ jobs:
       - name: Test with ThreadSanitizer
         env:
           TSAN_OPTIONS: symbolize=0
-        run: swift test --sanitize=thread --no-parallel
+        run: swift test --sanitize=thread
 
   apple-platforms:
     name: ${{ matrix.destination }}
