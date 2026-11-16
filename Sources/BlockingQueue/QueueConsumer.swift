@@ -10,10 +10,6 @@
 public struct QueueConsumer<Element: ~Copyable>: ~Copyable, Sendable {
   let cell: QueueCell<Element>
 
-  init(cell: QueueCell<Element>) {
-    self.cell = cell
-  }
-
   /// Blocks until an element is available, then removes and returns it from
   /// the front.
   ///

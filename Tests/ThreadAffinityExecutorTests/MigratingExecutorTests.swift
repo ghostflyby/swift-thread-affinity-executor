@@ -223,8 +223,10 @@ actor MigrationCounter {
   #expect(recorded[1].hasPrefix("initialize(1)@"))
   #expect(recorded[2].hasPrefix("finalize(0)@"))
   #expect(recorded[3].hasPrefix("finalize(1)@"))
-  #expect(recorded[0].dropFirst("initialize(0)@".count) == recorded[2].dropFirst("finalize(0)@".count))
-  #expect(recorded[1].dropFirst("initialize(1)@".count) == recorded[3].dropFirst("finalize(1)@".count))
+  #expect(
+    recorded[0].dropFirst("initialize(0)@".count) == recorded[2].dropFirst("finalize(0)@".count))
+  #expect(
+    recorded[1].dropFirst("initialize(1)@".count) == recorded[3].dropFirst("finalize(1)@".count))
 
   first.stop()
   second.stop()

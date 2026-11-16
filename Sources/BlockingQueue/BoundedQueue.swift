@@ -60,10 +60,6 @@ public struct BoundedQueueEnds<Element: ~Copyable>: ~Copyable, Sendable {
 public struct BoundedQueueProducer<Element: ~Copyable>: ~Copyable, Sendable {
   let cell: QueueCell<Element>
 
-  init(cell: QueueCell<Element>) {
-    self.cell = cell
-  }
-
   /// Tries to append `element` without waiting.
   ///
   /// The element is handed over (`consuming sending`): a non-`Sendable`

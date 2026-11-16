@@ -58,10 +58,6 @@ public struct QueueEnds<Element: ~Copyable>: ~Copyable, Sendable {
 public struct QueueProducer<Element: ~Copyable>: ~Copyable, Sendable {
   let cell: QueueCell<Element>
 
-  init(cell: QueueCell<Element>) {
-    self.cell = cell
-  }
-
   /// Appends `element` to the back; the queue grows as needed.
   ///
   /// The element is handed over (`consuming sending`): a non-`Sendable`
