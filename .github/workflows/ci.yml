@@ -5,32 +5,95 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     name: swift-format
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install swift-format
         run: brew install swift-format
       - name: Lint
-        run: swift-format lint --recursive --strict Sources Tests
+        run: swift-format lint --recursive --strict Package.swift Sources Tests
 
   test:
-    name: ${{ matrix.os }}
+    name: ${{ matrix.os }} · ${{ matrix.config }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - { os: macos-latest, config: debug }
+          - { os: macos-latest, config: release }
+          - { os: ubuntu-24.04, config: debug }
+          - { os: ubuntu-24.04, config: release }
     steps:
       - uses: actions/checkout@v4
       - name: Set up Swift
-        if: runner.os != 'macOS'
+        if: runner.os == 'Linux'
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "6.2"
+          swift-version: "6.2.1"
+      - name: Show toolchain
+        run: swift --version
+      - name: Build
+        run: swift build -c ${{ matrix.config }}
+      - name: Test
+        run: swift test -c ${{ matrix.config }} --no-parallel
+
+  # Swift 6 toolchains are not in setup-swift's Windows catalog (v2 stops at
+  # 5.6.3 for Windows), so Windows uses the community action on the VS 2022
+  # image. Experimental until the Windows test paths are verified.
+  windows:
+    name: windows-2022 (experimental)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Swift
+        uses: compnerd/gha-setup-swift@main
+        with:
+          branch: swift-6.2-release
+          tag: swift-6.2-RELEASE
+      - name: Show toolchain
+        run: swift --version
       - name: Build
         run: swift build
       - name: Test
-        run: swift test
+        run: swift test --no-parallel
+
+  tsan:
+    name: ThreadSanitizer
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test with ThreadSanitizer
+        run: swift test --sanitize=thread --no-parallel
+
+  apple-platforms:
+    name: ${{ matrix.destination }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        destination:
+          - generic/platform=iOS
+          - generic/platform=tvOS
+          - generic/platform=watchOS
+          - generic/platform=visionOS
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build for ${{ matrix.destination }}
+        run: >-
+          xcodebuild -scheme ThreadAffinityExecutor
+          -destination "${{ matrix.destination }}"
+          -quiet build
