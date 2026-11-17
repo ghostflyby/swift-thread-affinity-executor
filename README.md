@@ -79,7 +79,7 @@ swift build
 swift test
 ```
 
-Requires a Swift 6.2+ toolchain. Deployment floors: macOS 15 / iOS 18 / tvOS 18 / watchOS 11 / visionOS 2. Library products: `ThreadAffinityExecutor`, `BlockingQueue`. The Linux and Windows paths are written but not yet verified; the Linux CI leg currently does not compile (`Foundation.Thread` cannot be subclassed on swift-corelibs-foundation and `gettid` is not exposed by the Glibc module).
+Requires a Swift 6.2+ toolchain. Deployment floors: macOS 15 / iOS 18 / tvOS 18 / watchOS 11 / visionOS 2. Library products: `ThreadAffinityExecutor`, `BlockingQueue`. Linux and Windows are built and tested in CI: the dedicated executor owns a Foundation `Thread` instead of subclassing it, and Linux resolves `gettid` directly from libc.
 
 ## Known tradeoffs
 

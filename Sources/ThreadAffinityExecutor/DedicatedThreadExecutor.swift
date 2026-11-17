@@ -3,8 +3,8 @@
 //  ThreadAffinityExecutor
 //
 //  A thread-bound executor bound to a dedicated OS thread created with
-//  Foundation.Thread. The executor *is* the worker thread: it subclasses
-//  `Thread` and runs its service loop in the overridden `main()`.
+//  Foundation.Thread. The executor owns the worker thread and runs its
+//  service loop in a closure; the public type is not a Thread subclass.
 //
 
 import BlockingQueue
@@ -12,7 +12,8 @@ import Foundation
 
 /// An executor bound to a dedicated OS thread created via `Foundation.Thread`.
 ///
-/// The executor subclasses `Thread` directly. Jobs travel through the
+/// The executor owns a private `Thread` whose entry closure runs the service
+/// loop; the public type is not a `Thread` subclass. Jobs travel through the
 /// generic blocking queue from the `BlockingQueue` library; a one-shot
 /// handshake carries the worker's `ThreadID` and the outcome of the
 /// on-thread `initialize` hook from the bound thread to the constructor.
@@ -25,15 +26,16 @@ import Foundation
 ///   `shutdown()` returns only after `finalize` completed.
 /// - `init` returns only after `initialize` succeeded — the instance
 ///   accepts jobs the moment construction completes.
-/// - The running `Thread` is retained by Foundation until `main()` returns,
-///   so the executor cannot deallocate underneath an accepted-but-unrun job.
+/// - The worker `Thread` retains its entry closure — and therefore this
+///   executor — until the loop exits, so the executor cannot deallocate
+///   underneath an accepted-but-unrun job.
 /// - `shutdown()` — the dedicated modality's attach termination —
 ///   requires the quiescence contract: no actor, task or external producer
 ///   may still submit jobs. Remaining queued jobs are
 ///   executed before the thread exits; a job enqueued from the
 ///   `shutdown()` request onward is dropped and reported by the
 ///   producer's `enqueue` returning `false`.
-public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchecked Sendable {
+public final class DedicatedThreadExecutor: ThreadBoundExecutor, @unchecked Sendable {
   /// The worker thread's ID, published during the startup handshake.
   public var threadID: ThreadID {
     handshake.threadID
@@ -45,6 +47,8 @@ public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchec
   private let handshake = StartupHandshake()
   private let exitLatch = ExitLatch()
   private let lifecycle: any ThreadLifecycleDelegate
+  /// Retained for ownership; a running `Thread` also retains itself.
+  private var worker: Thread? = nil
 
   /// Creates the worker thread, runs the lifecycle's `initialize` on it
   /// and waits for the startup handshake.
@@ -67,11 +71,15 @@ public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchec
     self.consumer = ends.consumer
     self.supervisor = ends.supervisor
     self.lifecycle = lifecycle
-    super.init()
-    if let name {
-      self.name = name
+
+    let worker = Thread { [self] in
+      serviceLoop()
     }
-    self.start()
+    if let name {
+      worker.name = name
+    }
+    self.worker = worker
+    worker.start()
     // Ready ⇒ the worker initialized and published its ThreadID.
     try handshake.awaitReady()
   }
@@ -80,7 +88,7 @@ public final class DedicatedThreadExecutor: Thread, ThreadBoundExecutor, @unchec
   /// executes one job per wake-up until the queue is closed and fully
   /// drained; the lifecycle's `finalize` is the last code to run on the
   /// thread.
-  public override func main() {
+  private func serviceLoop() {
     let threadID = ThreadID.current
     do {
       try lifecycle.initialize()
