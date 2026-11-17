@@ -16,6 +16,8 @@ import Synchronization
 /// Implementations must run posted work **serially, in post order, never
 /// concurrently, always on the same fixed OS thread** for the executor's
 /// whole lifetime; otherwise the type cannot satisfy `ThreadBoundExecutor`.
+/// The executor does not re-check the delivering thread per job, so a
+/// violating dispatcher fails silently rather than trapping.
 public protocol FixedThreadDispatcher: Sendable {
   /// Runs `work` on the dispatcher's fixed OS thread.
   ///

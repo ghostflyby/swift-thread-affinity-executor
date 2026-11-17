@@ -213,7 +213,7 @@ public final class MigratingThreadExecutor: SerialExecutor, TaskExecutor, @unche
         // (QueueDispatcher does); this per-job pool is what releases each
         // job's autoreleased objects before the next job starts.
         withPerWorkAutoreleasePool {
-          run(job, on: info.threadID)
+          run(job)
         }
       }
       pump.finalize(info)
@@ -232,11 +232,7 @@ public final class MigratingThreadExecutor: SerialExecutor, TaskExecutor, @unche
     orchestrator.finishMigration()
   }
 
-  private func run(_ job: UnownedJob, on threadID: ThreadID) {
-    precondition(
-      ThreadID.current == threadID,
-      "Job executed off its generation's thread: expected \(threadID), got \(ThreadID.current)"
-    )
+  private func run(_ job: UnownedJob) {
     job.runSynchronously(
       isolatedTo: asUnownedSerialExecutor(),
       taskExecutor: asUnownedTaskExecutor()

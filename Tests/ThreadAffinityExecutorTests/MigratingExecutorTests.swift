@@ -14,10 +14,10 @@ import Testing
 
 private struct MigrationSetupFailed: Error {}
 
-/// Spawns a pump thread servicing a `QueueDispatcher` — an exclusive
-/// pump, as the successor contract requires. The dispatcher is created on
-/// the pump thread (its owner precondition requires it) and handed back
-/// through a semaphore-ordered bootstrap.
+/// Bootstrap for a pump thread servicing a `QueueDispatcher` — an exclusive
+/// pump, as the successor contract requires. The dispatcher is created
+/// inside the pump thread and handed back through a semaphore-ordered
+/// bootstrap; the first `run()` binds the pump there.
 private final class PumpBootstrap: @unchecked Sendable {
   let ready = DispatchSemaphore(value: 0)
   var dispatcher: QueueDispatcher?  // written before signal, read after wait
