@@ -58,6 +58,7 @@ public final class QueueDispatcher: FixedThreadDispatcher {
   ///   returns immediately.
   /// - Work posted before `run()` is entered runs in post order once the
   ///   pump starts.
+  @available(*, noasync)
   public func run() {
     precondition(
       ThreadID.current == ownerThreadID,

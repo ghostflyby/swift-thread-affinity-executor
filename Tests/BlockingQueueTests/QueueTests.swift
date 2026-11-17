@@ -167,6 +167,7 @@ import Testing
 
   // waitUntilSealed blocks; run it off the cooperative pool.
   let supervisor = ends.supervisor
+  let consumer = ends.consumer.share()
   let sealed = DispatchSemaphore(value: 0)
   let waiter = Thread {
     supervisor.waitUntilSealed()
@@ -174,16 +175,24 @@ import Testing
   }
   waiter.start()
 
-  let element = ends.consumer.take()
-  #expect(element == 7)
-  let drained = ends.consumer.take()
-  #expect(drained == nil)
+  let element = Box<Int?>(nil)
+  let drained = Box<Bool?>(nil)
+  let taken = DispatchSemaphore(value: 0)
+  let taker = Thread {
+    element.set(consumer.take())
+    drained.set(consumer.take() == nil)
+    taken.signal()
+  }
+  taker.start()
+  await awaitSignal(taken)
+
+  #expect(element.get() == 7)
+  #expect(drained.get() == true)
 
   await awaitSignal(sealed)
-  #expect(ends.supervisor.isSealed)
+  #expect(supervisor.isSealed)
 
   release(ends.producer)
-  release(ends.consumer)
 }
 
 @Test func concurrentSharedEndsDeliverExactlyOnce() async {
@@ -224,7 +233,7 @@ import Testing
   // Both takers return nil once production is closed and the queue drained.
   await awaitSignal(takersDone)
   await awaitSignal(takersDone)
-  supervisor.waitUntilSealed()
+  #expect(supervisor.isSealed)
 
   let received = collector.snapshot()
   #expect(received.count == total)
@@ -262,12 +271,20 @@ import Testing
     producer.close()
   }.value
 
-  guard let payload = consumer.take() else {
-    Issue.record("expected the enqueued element")
-    return
+  let value = Box<Int?>(nil)
+  let drained = Box<Bool?>(nil)
+  let taken = DispatchSemaphore(value: 0)
+  let taker = Thread {
+    let payload = consumer.take()
+    value.set(payload?.value)
+    drained.set(consumer.take() == nil)
+    taken.signal()
   }
-  #expect(payload.value == 42)
-  #expect(consumer.take() == nil)
+  taker.start()
+  await awaitSignal(taken)
+
+  #expect(value.get() == 42)
+  #expect(drained.get() == true)
 }
 
 /// The `~Copyable` axis of the element constraint: a move-only payload

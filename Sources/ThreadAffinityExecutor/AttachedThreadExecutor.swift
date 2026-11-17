@@ -180,6 +180,7 @@ public final class AttachedThreadExecutor: ThreadBoundExecutor {
   ///   the drop guard may instead be posted after the finalize post and
   ///   run after `finalize` — the producers-stopped precondition covers
   ///   this window.
+  @available(*, noasync)
   @discardableResult
   public func detach() -> Bool {
     precondition(

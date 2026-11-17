@@ -79,6 +79,7 @@ public struct BoundedQueueProducer<Element: ~Copyable>: ~Copyable, Sendable {
   ///
   /// Returns `false` (discarding `element`) once production is closed or no
   /// consumer end remains.
+  @available(*, noasync)
   @discardableResult
   public func enqueueBlocking(_ element: consuming sending Element) -> Bool {
     cell.enqueueBlocking(element)
@@ -137,6 +138,7 @@ public final class SharedBoundedQueueProducer<Element: ~Copyable>: Sendable {
   ///
   /// Returns `false` (discarding `element`) once production is closed or no
   /// consumer end remains.
+  @available(*, noasync)
   @discardableResult
   public func enqueueBlocking(_ element: consuming sending Element) -> Bool {
     cell.enqueueBlocking(element)

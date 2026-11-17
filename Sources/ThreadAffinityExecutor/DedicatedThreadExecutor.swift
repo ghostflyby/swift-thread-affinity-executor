@@ -59,6 +59,8 @@ public final class DedicatedThreadExecutor: ThreadBoundExecutor, @unchecked Send
   ///     modality anchors them at worker-thread entry/exit, with
   ///     `shutdown()` joining the exit epilogue.
   ///
+  /// The initializer waits only for thread startup and the on-thread
+  /// `initialize` hook, not for queued work; keep that hook short.
   /// `Foundation.Thread.start()` has no failure return, so a thread that
   /// cannot be spawned (resource exhaustion) blocks this initializer —
   /// accepted in exchange for not re-implementing thread management.
@@ -118,6 +120,7 @@ public final class DedicatedThreadExecutor: ThreadBoundExecutor, @unchecked Send
   /// - Precondition: called off the bound thread with the quiescence
   ///   contract satisfied (canceling tasks does not by itself guarantee
   ///   that). Idempotent.
+  @available(*, noasync)
   public func shutdown() {
     precondition(
       ThreadID.current != threadID,
