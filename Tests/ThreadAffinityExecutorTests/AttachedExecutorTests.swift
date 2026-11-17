@@ -333,7 +333,7 @@ private struct AttachInitializationFailed: Error {}
     rejectPostsAfter: 1
   )
   let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
-  #expect(executor.detach() == false)
+  #expect(await detach(executor) == false)
   #expect(finalCount.get() == 0)
   dispatcher.stopAndJoin()
 }
@@ -349,7 +349,7 @@ private struct AttachInitializationFailed: Error {}
 
   await withTaskGroup(of: Bool.self) { group in
     for _ in 0..<8 {
-      group.addTask { executor.detach() }
+      group.addTask { await detach(executor) }
     }
     var results: [Bool] = []
     for await result in group {
@@ -388,8 +388,8 @@ private struct AttachInitializationFailed: Error {}
   // The job is executing: its post already precedes the finalize post.
   await waitForSignal(delivered)
 
-  executor.detach()
-  executor.detach()  // idempotent: finalize ran once, both calls returned
+  await detach(executor)
+  await detach(executor)  // idempotent: finalize ran once, both calls returned
 
   await job.value
 
@@ -406,7 +406,7 @@ private struct AttachInitializationFailed: Error {}
   let ran = TestBox(0)
   let executor = try await AttachedThreadExecutor.attach(to: dispatcher)
 
-  executor.detach()
+  await detach(executor)
   Task.detached {
     await withTaskExecutorPreference(executor) {
       ran.with { $0 += 1 }

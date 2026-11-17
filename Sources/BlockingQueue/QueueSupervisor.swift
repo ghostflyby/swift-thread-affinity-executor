@@ -36,6 +36,7 @@ public final class QueueSupervisor<Element: ~Copyable>: Sendable {
   }
 
   /// Blocks until the queue is sealed.
+  @available(*, noasync)
   public func waitUntilSealed() {
     cell.waitUntilSealed()
   }

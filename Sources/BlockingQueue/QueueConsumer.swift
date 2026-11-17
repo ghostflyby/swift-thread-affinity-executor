@@ -15,6 +15,7 @@ public struct QueueConsumer<Element: ~Copyable>: ~Copyable, Sendable {
   ///
   /// Returns `nil` once the queue is closed and fully drained (or no
   /// consumer end remains); that observation seals the queue.
+  @available(*, noasync)
   public func take() -> sending Element? {
     cell.take()
   }
@@ -52,6 +53,7 @@ public final class SharedQueueConsumer<Element: ~Copyable>: Sendable {
   ///
   /// Returns `nil` once the queue is closed and fully drained (or no
   /// consumer end remains); that observation seals the queue.
+  @available(*, noasync)
   public func take() -> sending Element? {
     cell.take()
   }

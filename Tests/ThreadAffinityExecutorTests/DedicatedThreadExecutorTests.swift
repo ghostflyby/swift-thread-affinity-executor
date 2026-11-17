@@ -31,7 +31,7 @@ import Testing
       group.addTask {
         let executor = try DedicatedThreadExecutor(name: "tae-concurrent-\(index)")
         #expect(executor.threadID != ThreadID.current)
-        executor.shutdown()
+        await shutdown(executor)
       }
     }
     try await group.waitForAll()
@@ -57,7 +57,7 @@ import Testing
   }
   #expect(jobThread == initializerThreads.get().first)
   #expect(jobThread == executor.threadID)
-  executor.shutdown()
+  await shutdown(executor)
 }
 
 private struct InitializationFailed: Error {}
@@ -95,7 +95,7 @@ private struct InitializationFailed: Error {}
   }
 
   // shutdown() joins the exit epilogue: finalize has completed here.
-  executor.shutdown()
+  await shutdown(executor)
   #expect(finalThread.get() == jobThread.get())
   #expect(finalThread.get() == executor.threadID)
 }
@@ -122,7 +122,7 @@ private struct InitializationFailed: Error {}
 
   #expect(observed.count == 200)
   #expect(observed.allSatisfy { $0 == executor.threadID })
-  executor.shutdown()
+  await shutdown(executor)
 }
 
 /// Concurrent submitters, exactly-once
@@ -147,7 +147,7 @@ private struct InitializationFailed: Error {}
 
   #expect(counter.value == 8 * 250)
   #expect(threadsSeen.get() == [executor.threadID])
-  executor.shutdown()
+  await shutdown(executor)
 }
 
 // MARK: - Isolation checks
@@ -169,7 +169,7 @@ private struct InitializationFailed: Error {}
   }
 
   #expect(positive == true)
-  executor.shutdown()
+  await shutdown(executor)
 }
 
 /// Jobs accepted before shutdown all execute; the
@@ -191,7 +191,7 @@ private struct InitializationFailed: Error {}
     }
   }
 
-  executor.shutdown()
+  await shutdown(executor)
   #expect(counter.value == 200)
   #expect(executor.hasFinished)
 }

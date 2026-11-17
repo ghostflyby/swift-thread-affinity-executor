@@ -119,7 +119,7 @@
       jobThreads.with { $0.append(ThreadID.current) }
     }
 
-    executor.detach()
+    await detach(executor)
 
     #expect(jobThreads.get().first == initializerThreads.get().first)
     #expect(jobThreads.get().first == executor.threadID)
