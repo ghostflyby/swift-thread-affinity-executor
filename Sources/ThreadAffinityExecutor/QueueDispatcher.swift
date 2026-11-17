@@ -24,11 +24,16 @@ import Synchronization
 /// As a `ThreadPumpDelegate` it carries one `lifecycle`; this pump anchors
 /// `finalize` at the first of the attachment's `detach()` or a bare
 /// pump's `run()` exit — whichever the usage reaches.
+///
+/// The first `initialize()` or `run()` call binds the pump to the calling
+/// thread; later `run()` and lifecycle calls must come from that thread.
+/// `finalize()` requires an existing binding. Construction itself is not
+/// bound, and `post()`/`stop()` are safe from any thread.
 public final class QueueDispatcher: FixedThreadDispatcher {
   private let producer: SharedQueueProducer<@Sendable () -> Void>
   private let consumer: QueueConsumer<@Sendable () -> Void>
   private let supervisor: QueueSupervisor<@Sendable () -> Void>
-  private let ownerThreadID: ThreadID
+  private let ownerThread = Mutex<ThreadID?>(nil)
   private let lifecycle: any ThreadLifecycleDelegate
   private let finalized = Atomic<Bool>(false)
 
@@ -37,7 +42,6 @@ public final class QueueDispatcher: FixedThreadDispatcher {
     producer = ends.producer.share()
     consumer = ends.consumer
     supervisor = ends.supervisor
-    ownerThreadID = ThreadID.current
     self.lifecycle = lifecycle
   }
 
@@ -48,22 +52,48 @@ public final class QueueDispatcher: FixedThreadDispatcher {
     producer.enqueue(work)
   }
 
+  /// Binds the pump to the first thread that enters `run()` or
+  /// `initialize()`, and traps when another thread already bound it.
+  private func bindOwnerThread(_ operation: String) {
+    let current = ThreadID.current
+    let owner = ownerThread.withLock { owner -> ThreadID in
+      if let existing = owner {
+        return existing
+      }
+      owner = current
+      return current
+    }
+    precondition(
+      current == owner,
+      "\(operation) must be called from the thread that first bound the pump: expected \(owner), got \(current)"
+    )
+  }
+
+  /// Traps unless the pump is already bound to the calling thread.
+  private func requireOwnerThread(_ operation: String) {
+    let current = ThreadID.current
+    guard let owner = ownerThread.withLock({ $0 }) else {
+      preconditionFailure("\(operation) called before the pump was bound to a thread")
+    }
+    precondition(
+      current == owner,
+      "\(operation) must be called from the bound thread: expected \(owner), got \(current)"
+    )
+  }
+
   /// Occupies the calling thread, running posted work until `stop()` was
   /// requested and the queue drained.
   ///
-  /// - Must be called from the thread that created the dispatcher (the
-  ///   self-attach thread): running the work elsewhere would silently
-  ///   break the thread-binding guarantee, hence the precondition.
+  /// - The first call binds the pump to the calling thread; later `run()`
+  ///   and lifecycle calls must come from that thread. Running elsewhere
+  ///   traps instead of breaking the binding silently.
   /// - A pump whose `run()` already completed has nothing left to do and
   ///   returns immediately.
   /// - Work posted before `run()` is entered runs in post order once the
   ///   pump starts.
   @available(*, noasync)
   public func run() {
-    precondition(
-      ThreadID.current == ownerThreadID,
-      "run() must be called from the thread that created the dispatcher: expected \(ownerThreadID), got \(ThreadID.current)"
-    )
+    bindOwnerThread("run()")
 
     while let work = consumer.take() {
       withPerWorkAutoreleasePool {
@@ -80,13 +110,11 @@ public final class QueueDispatcher: FixedThreadDispatcher {
     supervisor.close()
   }
 
-  /// The lifecycle's finalize, exactly once, on the owner thread — shared
-  /// by `run()` exit and the delegate conformance.
+  /// The lifecycle's finalize, exactly once, on the bound thread — shared
+  /// by `run()` exit and the delegate conformance. The caller must already
+  /// have bound the pump.
   private func runLifecycleFinalize() {
-    precondition(
-      ThreadID.current == ownerThreadID,
-      "QueueDispatcher lifecycle hooks run on the owner thread: expected \(ownerThreadID), got \(ThreadID.current)"
-    )
+    requireOwnerThread("QueueDispatcher finalize()")
     if finalized.compareExchange(expected: false, desired: true, ordering: .acquiringAndReleasing)
       .exchanged
     {
@@ -96,14 +124,11 @@ public final class QueueDispatcher: FixedThreadDispatcher {
 }
 
 extension QueueDispatcher: ThreadPumpDelegate {
-  /// Runs at the attach handshake on the owner thread — posted via `run()`
+  /// Runs at the attach handshake on the target thread — posted via `run()`
   /// for classic attachment, synchronously for self-attach — before any
-  /// posted work.
+  /// posted work. Binds the pump to this thread on first use.
   public func initialize() throws {
-    precondition(
-      ThreadID.current == ownerThreadID,
-      "QueueDispatcher lifecycle hooks run on the owner thread: expected \(ownerThreadID), got \(ThreadID.current)"
-    )
+    bindOwnerThread("QueueDispatcher initialize()")
     try lifecycle.initialize()
   }
 

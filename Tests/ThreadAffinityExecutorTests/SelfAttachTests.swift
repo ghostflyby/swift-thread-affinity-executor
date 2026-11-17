@@ -228,6 +228,61 @@ private struct SelfAttachInitializationFailed: Error {}
   dispatcher.run()
 }
 
+/// A dispatcher is not bound at construction: the first `run()`/lifecycle
+/// entry claims the owner thread, so a Sendable pump can be created on one
+/// thread and entered on another.
+@Test func dispatcherBindsOwnerThreadOnFirstRun() async {
+  let dispatcher = QueueDispatcher()
+  let observed = TestBox<ThreadID?>(nil)
+  let pumpThread = TestBox<ThreadID?>(nil)
+  let ran = DispatchSemaphore(value: 0)
+  let finished = DispatchSemaphore(value: 0)
+
+  dispatcher.post {
+    observed.set(ThreadID.current)
+    ran.signal()
+  }
+  dispatcher.stop()
+
+  let thread = Thread {
+    pumpThread.set(ThreadID.current)
+    dispatcher.run()
+    finished.signal()
+  }
+  thread.start()
+
+  await waitForSignal(ran)
+  await waitForSignal(finished)
+  #expect(observed.get() == pumpThread.get())
+  #expect(observed.get() != ThreadID.current)
+}
+
+/// `initialize()` is a separate binding entry: self-attach on a thread
+/// other than the constructing thread binds the pump there.
+@Test func dispatcherBindsOwnerThreadOnSelfAttach() async {
+  let dispatcher = QueueDispatcher()
+  let pumpThread = TestBox<ThreadID?>(nil)
+  let executorBox = TestBox<AttachedThreadExecutor?>(nil)
+  let ready = DispatchSemaphore(value: 0)
+  let finished = DispatchSemaphore(value: 0)
+
+  let thread = Thread {
+    pumpThread.set(ThreadID.current)
+    executorBox.set(try? AttachedThreadExecutor.attachOnCurrentThread(to: dispatcher))
+    ready.signal()
+    dispatcher.stop()
+    dispatcher.run()
+    finished.signal()
+  }
+  thread.start()
+
+  await waitForSignal(ready)
+  await waitForSignal(finished)
+
+  #expect(executorBox.get()?.threadID == pumpThread.get())
+  #expect(pumpThread.get() != ThreadID.current)
+}
+
 #if canImport(Darwin)
   private final class AutoreleaseProbe: NSObject {
     private let onDeinit: @Sendable () -> Void

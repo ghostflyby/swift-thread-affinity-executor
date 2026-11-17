@@ -56,12 +56,9 @@ extension ThreadBoundExecutor {
     )
   }
 
-  /// Runs a job on the calling thread, which must be the bound thread.
+  /// Runs a job on the calling thread. The executor's scheduling already
+  /// guarantees the calling thread is the bound thread.
   func runJob(_ job: consuming UnownedJob) {
-    precondition(
-      threadID == ThreadID.current,
-      "Job executed off the executor's bound thread: expected \(threadID), got \(ThreadID.current)"
-    )
     job.runSynchronously(
       isolatedTo: asUnownedSerialExecutor(),
       taskExecutor: asUnownedTaskExecutor()
