@@ -10,8 +10,7 @@
 //  static guarantees rather than conventions.
 //
 
-/// Selects single-producer, single-consumer ends: the same exclusive ends as
-/// the parameterless `split()`, spelled explicitly.
+/// Selects single-producer, single-consumer ends: the exclusive SPSC ends.
 public struct SPSCOption: Sendable {
   private init() {}
 

@@ -9,7 +9,7 @@ import Foundation
 import Testing
 
 @Test func tryEnqueueFailsWhenFullAndRecoversAfterTake() {
-  let ends = BoundedQueue<Int>(capacity: 2).split()
+  let ends = BoundedQueue<Int>(capacity: 2).split(.spsc)
 
   let first = ends.producer.enqueue(1)
   #expect(first)
@@ -36,7 +36,7 @@ import Testing
 }
 
 @Test func enqueueBlockingWaitsForSpace() {
-  let ends = BoundedQueue<Int>(capacity: 1).split()
+  let ends = BoundedQueue<Int>(capacity: 1).split(.spsc)
   let producer = ends.producer
   let consumer = ends.consumer
 
@@ -65,7 +65,7 @@ import Testing
 }
 
 @Test func enqueueBlockingFailsWithoutConsumers() {
-  let ends = BoundedQueue<Int>(capacity: 1).split()
+  let ends = BoundedQueue<Int>(capacity: 1).split(.spsc)
   release(ends.consumer)
 
   let blocked = ends.producer.enqueueBlocking(1)
@@ -76,7 +76,7 @@ import Testing
 }
 
 @Test func boundedFifoAcrossRounds() {
-  let ends = BoundedQueue<Int>(capacity: 4).split()
+  let ends = BoundedQueue<Int>(capacity: 4).split(.spsc)
 
   for round in 0..<3 {
     let base = round * 4
@@ -121,8 +121,41 @@ import Testing
   release(ends.consumer)
 }
 
+/// `.spmc` mints an exclusive producer end while the consumer side is a
+/// cloneable class reference; competing takers each element exactly once.
+@Test func boundedSharedConsumersCompeteForElements() async {
+  let ends = BoundedQueue<Int>(capacity: 4).split(.spmc)
+  let producer = ends.producer
+  let collector = Collector()
+
+  for value in 0..<4 {
+    let accepted = producer.enqueue(value)
+    #expect(accepted)
+  }
+  producer.finish()
+
+  let takersDone = DispatchSemaphore(value: 0)
+  for _ in 0..<2 {
+    let consumer = ends.consumer
+    let taker = Thread {
+      while let value = consumer.take() {
+        collector.append(value)
+      }
+      takersDone.signal()
+    }
+    taker.start()
+  }
+  await awaitSignal(takersDone)
+  await awaitSignal(takersDone)
+
+  #expect(ends.supervisor.isSealed)
+  let received = collector.snapshot()
+  #expect(received.count == 4)
+  #expect(Set(received) == Set(0..<4))
+}
+
 @Test func blockedEnqueueWakesOnClose() {
-  let ends = BoundedQueue<Int>(capacity: 1).split()
+  let ends = BoundedQueue<Int>(capacity: 1).split(.spsc)
   let producer = ends.producer
   let consumer = ends.consumer
 
@@ -152,7 +185,7 @@ import Testing
 }
 
 @Test func blockedEnqueueWakesOnConsumerRelease() {
-  let ends = BoundedQueue<Int>(capacity: 1).split()
+  let ends = BoundedQueue<Int>(capacity: 1).split(.spsc)
   let producer = ends.producer
   let consumer = ends.consumer
 
@@ -176,7 +209,7 @@ import Testing
 }
 
 @Test func boundedSupervisorCloseDrainsThenSeals() {
-  let ends = BoundedQueue<Int>(capacity: 2).split()
+  let ends = BoundedQueue<Int>(capacity: 2).split(.spsc)
   let first = ends.producer.enqueue(1)
   #expect(first)
   let second = ends.producer.enqueue(2)
@@ -208,7 +241,7 @@ import Testing
 }
 
 @Test func drainAllUnblocksWaitingProducer() {
-  let ends = BoundedQueue<Int>(capacity: 1).split()
+  let ends = BoundedQueue<Int>(capacity: 1).split(.spsc)
   let producer = ends.producer
   let consumer = ends.consumer
   let supervisor = ends.supervisor
@@ -240,7 +273,7 @@ import Testing
 /// Non-`Sendable` copyable elements traverse the bounded family too — both
 /// the try and the blocking enqueue resolve to the `sending` handoff.
 @Test func boundedNonSendableElementTraversesQueue() {
-  let ends = BoundedQueue<OpaquePayload>(capacity: 1).split()
+  let ends = BoundedQueue<OpaquePayload>(capacity: 1).split(.spsc)
 
   let first = ends.producer.enqueue(OpaquePayload(value: 5))
   #expect(first)

@@ -6,7 +6,7 @@
 /// Single, move-only consumer end. `take()` blocks until an element is
 /// available; `nil` means the queue is sealed.
 ///
-/// Minted by `split()` / `split(.spsc)` / `split(.mpsc)`. Releasing the end
+/// Minted by `split(.spsc)` / `split(.mpsc)`. Releasing the end
 /// seals the queue from the consumer side. There is no `share()` upgrade:
 /// the endpoint shape is fixed at split time.
 public struct QueueConsumer<Element: ~Copyable>: ~Copyable, Sendable {

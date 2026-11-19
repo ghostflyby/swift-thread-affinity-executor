@@ -8,11 +8,11 @@
 
 /// Linear construction token for a bounded queue with fixed capacity.
 ///
-/// `split()` consumes the token; afterwards no further ends can be minted.
-/// The endpoint shape is fixed at split time — `split()` (or
-/// `split(.spsc)`) yields exclusive ends, `split(.mpsc)` / `.spmc` /
-/// `.mpmc` share the requested side(s). Exclusive ends have no `share()`
-/// upgrade, so the chosen shape is a static guarantee.
+/// `split(_:)` consumes the token; afterwards no further ends can be minted.
+/// The endpoint shape is fixed at split time — `split(.spsc)` yields
+/// exclusive ends, `split(.mpsc)` / `.spmc` / `.mpmc` share the requested
+/// side(s). Exclusive ends have no `share()` upgrade, so the chosen shape
+/// is a static guarantee.
 ///
 /// Elements need not be `Sendable`: ownership transfers through the queue —
 /// `consuming sending` in on enqueue, `sending` out on take. The handoff
@@ -29,7 +29,7 @@ public struct BoundedQueue<Element: ~Copyable>: ~Copyable, Sendable {
 
   /// Splits the queue into one exclusive producer end, one exclusive
   /// consumer end and a supervisor — SPSC. Consumes the token.
-  public consuming func split() -> BoundedQueueEnds<Element> {
+  public consuming func split(_ option: SPSCOption) -> BoundedQueueEnds<Element> {
     cell.addProducer()
     cell.addConsumer()
     return BoundedQueueEnds(
@@ -37,12 +37,6 @@ public struct BoundedQueue<Element: ~Copyable>: ~Copyable, Sendable {
       consumer: QueueConsumer(cell: cell),
       supervisor: QueueSupervisor(cell: cell)
     )
-  }
-
-  /// Splits the queue into exclusive ends — SPSC, spelled explicitly.
-  /// Consumes the token. Equivalent to `split()`.
-  public consuming func split(_ option: SPSCOption) -> BoundedQueueEnds<Element> {
-    split()
   }
 
   /// Splits the queue into a cloneable producer end, one exclusive consumer
@@ -78,7 +72,8 @@ public struct BoundedQueue<Element: ~Copyable>: ~Copyable, Sendable {
   }
 }
 
-/// The three capabilities handed out by `BoundedQueue.split()`: move-only.
+/// The three capabilities handed out by `BoundedQueue.split(.spsc)`:
+/// move-only.
 @frozen
 public struct BoundedQueueEnds<Element: ~Copyable>: ~Copyable, Sendable {
   public let producer: BoundedQueueProducer<Element>
@@ -142,7 +137,7 @@ public struct BoundedMPMCQueueEnds<Element: ~Copyable>: ~Copyable, Sendable {
 
 /// Single, move-only producer end of a bounded queue.
 ///
-/// Minted by `split()` / `split(.spsc)` / `split(.spmc)`. Releasing the end
+/// Minted by `split(.spsc)` / `split(.spmc)`. Releasing the end
 /// (or `finish()`) closes production. There is no `share()` upgrade: the
 /// endpoint shape is fixed at split time.
 public struct BoundedQueueProducer<Element: ~Copyable>: ~Copyable, Sendable {

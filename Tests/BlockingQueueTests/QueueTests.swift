@@ -9,7 +9,7 @@ import Foundation
 import Testing
 
 @Test func fifoOrderWithUniqueEnds() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
 
   for i in 0..<100 {
     let accepted = ends.producer.enqueue(i)
@@ -27,9 +27,8 @@ import Testing
   release(ends.consumer)
 }
 
-/// `split(.spsc)` is the explicit spelling of the default split: the same
-/// exclusive ends, minted by an option.
-@Test func spscOptionMatchesDefaultSplit() {
+/// `split(.spsc)` mints the exclusive producer/consumer ends.
+@Test func spscOptionMintsExclusiveEnds() {
   let ends = Queue<Int>().split(.spsc)
 
   let accepted = ends.producer.enqueue(1)
@@ -38,6 +37,27 @@ import Testing
   #expect(first == 1)
   ends.producer.finish()
 
+  let drained = ends.consumer.take()
+  #expect(drained == nil)
+  #expect(ends.supervisor.isSealed)
+  release(ends.consumer)
+}
+
+/// `.mpsc` mints a cloneable producer end while the consumer side stays
+/// exclusive; sharing the class reference feeds the one consumer.
+@Test func sharedProducerFeedsExclusiveConsumer() {
+  let ends = Queue<Int>().split(.mpsc)
+  let producer = ends.producer
+  let clone = producer
+
+  #expect(clone.enqueue(1))
+  #expect(producer.enqueue(2))
+  producer.close()
+
+  let first = ends.consumer.take()
+  #expect(first == 1)
+  let second = ends.consumer.take()
+  #expect(second == 2)
   let drained = ends.consumer.take()
   #expect(drained == nil)
   #expect(ends.supervisor.isSealed)
@@ -69,7 +89,7 @@ import Testing
 }
 
 @Test func supervisorCloseDrainsThenSeals() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   ends.producer.enqueue(1)
   ends.producer.enqueue(2)
 
@@ -94,7 +114,7 @@ import Testing
 }
 
 @Test func closeOnEmptySealsOnFirstTake() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   ends.supervisor.close()
   let drained = ends.consumer.take()
   #expect(drained == nil)
@@ -105,7 +125,7 @@ import Testing
 }
 
 @Test func enqueueFailsAfterSeal() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   ends.producer.enqueue(1)
   ends.supervisor.close()
   let first = ends.consumer.take()
@@ -123,7 +143,7 @@ import Testing
 }
 
 @Test func producerFinishClosesProduction() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   ends.producer.enqueue(7)
 
   ends.producer.finish()
@@ -137,7 +157,7 @@ import Testing
 }
 
 @Test func producerReleaseClosesProduction() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   release(ends.producer)
 
   // last producer end gone: closed and empty, the take seals
@@ -148,7 +168,7 @@ import Testing
 }
 
 @Test func consumerReleaseFailsEnqueue() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   release(ends.consumer)
 
   #expect(ends.supervisor.isSealed)
@@ -158,7 +178,7 @@ import Testing
 }
 
 @Test func supervisorDrainAllTakesEverythingInOrder() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   ends.producer.enqueue(1)
   ends.producer.enqueue(2)
   ends.producer.enqueue(3)
@@ -265,13 +285,10 @@ import Testing
   let ends = Queue<Int>().split(.mpmc)
   let producer = ends.producer
   let supervisor = ends.supervisor
-  var consumer: SharedQueueConsumer<Int>? = ends.consumer
-  #expect(consumer != nil)
   #expect(supervisor.isSealed == false)
 
-  // dropping every reference — the local and the one held by the ends —
-  // disconnects the shared end: sealed
-  consumer = nil
+  // dropping the ends' shared-consumer reference disconnects the consumer
+  // side: sealed
   release(ends)
   #expect(supervisor.isSealed)
 
@@ -312,7 +329,7 @@ import Testing
 /// The `~Copyable` axis of the element constraint: a move-only payload
 /// traverses the queue as well.
 @Test func nonCopyableElementTraversesQueue() {
-  let ends = Queue<SingleShot>().split()
+  let ends = Queue<SingleShot>().split(.spsc)
   let accepted = ends.producer.enqueue(SingleShot())
   #expect(accepted)
   ends.producer.finish()
@@ -328,7 +345,7 @@ import Testing
 /// The `sending` handoff must not produce false positives: reusing a
 /// `Sendable` value after enqueue stays legal.
 @Test func sendableElementRemainsUsableAfterEnqueue() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   let value = 7
   let accepted = ends.producer.enqueue(value)
   #expect(accepted)

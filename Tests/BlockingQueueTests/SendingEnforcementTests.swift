@@ -101,14 +101,12 @@ private var compileCheckSupported: Bool {
   }
 #endif
 
-/// The `sending` overload selected for copyable elements must keep
-/// well-behaved non-`Sendable` use compiling (control), and must reject
-/// use-after-enqueue of a non-`Sendable` element (violation). Verified
-/// against the built module with a real compiler run, so the guarantee
-/// holds for ordinary cross-module clients of this library.
-@Test(.enabled(if: compileCheckSupported))
-func nonSendableUseAfterEnqueueIsRejectedAtCompileTime() throws {
-  #if os(macOS)
+#if os(macOS)
+  /// A producer end must accept a non-`Sendable` element (control) and must
+  /// reject using that element after the handoff (violation).
+  private func expectSendingViolation(
+    producerType: String, products: String, swiftc: String
+  ) throws {
     let control = """
       import BlockingQueue
 
@@ -116,7 +114,7 @@ func nonSendableUseAfterEnqueueIsRejectedAtCompileTime() throws {
         var v = 0
       }
 
-      func behave(_ producer: SharedQueueProducer<Payload>) {
+      func behave(_ producer: borrowing \(producerType)<Payload>) {
         let p = Payload()
         producer.enqueue(p)
       }
@@ -129,13 +127,38 @@ func nonSendableUseAfterEnqueueIsRejectedAtCompileTime() throws {
         var v = 0
       }
 
-      func violate(_ producer: SharedQueueProducer<Payload>) {
+      func violate(_ producer: borrowing \(producerType)<Payload>) {
         let p = Payload()
         producer.enqueue(p)
         p.v += 1
       }
       """
 
+    let controlResult = try compile(control, products: products, swiftc: swiftc)
+    #expect(
+      controlResult.status == 0,
+      "\(producerType) control snippet must compile — got:\n\(controlResult.diagnostics)"
+    )
+
+    let violationResult = try compile(violation, products: products, swiftc: swiftc)
+    #expect(
+      violationResult.status != 0,
+      "\(producerType) use-after-enqueue must not compile"
+    )
+    #expect(
+      violationResult.diagnostics.contains("sending"),
+      "expected the use-after-send diagnostic for \(producerType) — got:\n\(violationResult.diagnostics)"
+    )
+  }
+#endif
+
+/// Every producer end — exclusive and shared, unbounded and bounded — must
+/// enforce the `sending` handoff. Verified against the built module with a
+/// real compiler run, so the guarantee holds for ordinary cross-module
+/// clients of this library.
+@Test(.enabled(if: compileCheckSupported))
+func producerUseAfterEnqueueIsRejectedAtCompileTime() throws {
+  #if os(macOS)
     let swiftc: String
     let products: String
     do {
@@ -146,17 +169,13 @@ func nonSendableUseAfterEnqueueIsRejectedAtCompileTime() throws {
       return
     }
 
-    let controlResult = try compile(control, products: products, swiftc: swiftc)
-    #expect(
-      controlResult.status == 0,
-      "control snippet must compile — got:\n\(controlResult.diagnostics)"
-    )
-
-    let violationResult = try compile(violation, products: products, swiftc: swiftc)
-    #expect(violationResult.status != 0, "use-after-enqueue must not compile")
-    #expect(
-      violationResult.diagnostics.contains("sending"),
-      "expected the use-after-send diagnostic — got:\n\(violationResult.diagnostics)"
-    )
+    for producerType in [
+      "QueueProducer", "SharedQueueProducer",
+      "BoundedQueueProducer", "SharedBoundedQueueProducer",
+    ] {
+      try expectSendingViolation(
+        producerType: producerType, products: products, swiftc: swiftc
+      )
+    }
   #endif
 }
