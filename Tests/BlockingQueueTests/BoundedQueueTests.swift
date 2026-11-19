@@ -50,7 +50,7 @@ import Testing
     done.signal()
   }
   thread.start()
-  Thread.sleep(forTimeInterval: 0.05)
+  waitForWaiters(ends.supervisor, producers: 1)
 
   // freeing the slot unblocks the waiting producer
   let taken = consumer.take()
@@ -128,12 +128,6 @@ import Testing
   let producer = ends.producer
   let collector = Collector()
 
-  for value in 0..<4 {
-    let accepted = producer.enqueue(value)
-    #expect(accepted)
-  }
-  producer.finish()
-
   let takersDone = DispatchSemaphore(value: 0)
   for _ in 0..<2 {
     let consumer = ends.consumer
@@ -145,6 +139,14 @@ import Testing
     }
     taker.start()
   }
+  waitForWaiters(ends.supervisor, consumers: 2)
+
+  for value in 0..<4 {
+    let accepted = producer.enqueue(value)
+    #expect(accepted)
+  }
+  producer.finish()
+
   await awaitSignal(takersDone)
   await awaitSignal(takersDone)
 
@@ -152,6 +154,57 @@ import Testing
   let received = collector.snapshot()
   #expect(received.count == 4)
   #expect(Set(received) == Set(0..<4))
+}
+
+/// Releasing the last shared-producer reference closes production even
+/// without an explicit `close()`.
+@Test func boundedSharedProducerReleaseClosesProduction() {
+  let ends = BoundedQueue<Int>(capacity: 1).split(.mpmc)
+  let consumer = ends.consumer
+  let supervisor = ends.supervisor
+  #expect(supervisor.isClosed == false)
+
+  // dropping the ends' shared-producer reference closes production
+  release(ends)
+  #expect(supervisor.isClosed)
+
+  let drained = consumer.take()
+  #expect(drained == nil)
+  #expect(supervisor.isSealed)
+  release(consumer)
+}
+
+/// `.spmc`'s exclusive producer wakes when a shared taker frees a bounded
+/// slot; no other waiter class is present, so this exercises the single
+/// signal path.
+@Test func boundedSPMCTakeWakesBlockedProducer() {
+  let ends = BoundedQueue<Int>(capacity: 1).split(.spmc)
+  let producer = ends.producer
+  let consumer = ends.consumer
+
+  let initial = producer.enqueue(1)
+  #expect(initial)
+
+  let result = Box<Bool?>(nil)
+  let done = DispatchSemaphore(value: 0)
+  let thread = Thread {
+    result.set(producer.enqueueBlocking(2))
+    done.signal()
+  }
+  thread.start()
+  waitForWaiters(ends.supervisor, producers: 1)
+
+  let first = consumer.take()
+  #expect(first == 1)
+  done.wait()
+  #expect(result.get() == true)
+  let second = consumer.take()
+  #expect(second == 2)
+
+  ends.supervisor.close()
+  let drained = consumer.take()
+  #expect(drained == nil)
+  #expect(ends.supervisor.isSealed)
 }
 
 @Test func blockedEnqueueWakesOnClose() {
@@ -169,7 +222,7 @@ import Testing
     done.signal()
   }
   thread.start()
-  Thread.sleep(forTimeInterval: 0.05)
+  waitForWaiters(ends.supervisor, producers: 1)
 
   // closing production wakes the blocked producer with a failure
   ends.supervisor.close()
@@ -199,7 +252,7 @@ import Testing
     done.signal()
   }
   thread.start()
-  Thread.sleep(forTimeInterval: 0.05)
+  waitForWaiters(ends.supervisor, producers: 1)
 
   // releasing the last consumer end wakes the blocked producer with failure
   release(consumer)
@@ -256,7 +309,7 @@ import Testing
     done.signal()
   }
   thread.start()
-  Thread.sleep(forTimeInterval: 0.05)
+  waitForWaiters(supervisor, producers: 1)
 
   // draining frees the slot and wakes the blocked producer
   var drained = supervisor.drainAll()
@@ -312,7 +365,7 @@ import Testing
   }
   taker.start()
   sealedWaiter.start()
-  Thread.sleep(forTimeInterval: 0.05)
+  waitForWaiters(supervisor, consumers: 1, sealed: 1)
 
   #expect(producer.enqueue(1))
   #expect(took.wait(timeout: .now() + 2) == .success)
@@ -345,7 +398,7 @@ import Testing
   }
   producerThread.start()
   sealedWaiter.start()
-  Thread.sleep(forTimeInterval: 0.05)
+  waitForWaiters(supervisor, producers: 1, sealed: 1)
 
   #expect(consumer.take() == 1)
   #expect(produced.wait(timeout: .now() + 2) == .success)

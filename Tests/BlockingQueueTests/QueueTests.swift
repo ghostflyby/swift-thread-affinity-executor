@@ -64,6 +64,24 @@ import Testing
   release(ends.consumer)
 }
 
+/// Releasing the last shared-producer reference closes production even
+/// without an explicit `close()`.
+@Test func sharedProducerReleaseClosesProduction() {
+  let ends = Queue<Int>().split(.mpmc)
+  let consumer = ends.consumer
+  let supervisor = ends.supervisor
+  #expect(supervisor.isClosed == false)
+
+  // dropping the ends' shared-producer reference closes production
+  release(ends)
+  #expect(supervisor.isClosed)
+
+  let drained = consumer.take()
+  #expect(drained == nil)
+  #expect(supervisor.isSealed)
+  release(consumer)
+}
+
 @Test func blockedTakeWakesOnEnqueue() async {
   let ends = Queue<String>().split(.spmc)
   let consumer = ends.consumer
@@ -77,8 +95,8 @@ import Testing
     taken.signal()
   }
   taker.start()
-  // the queue is empty and open, so the taker can only still be blocked
-  try? await Task.sleep(for: .milliseconds(50))
+  // the queue is empty and open, so the taker registers as a consumer waiter
+  waitForWaiters(ends.supervisor, consumers: 1)
 
   let accepted = ends.producer.enqueue("hello")
   #expect(accepted)

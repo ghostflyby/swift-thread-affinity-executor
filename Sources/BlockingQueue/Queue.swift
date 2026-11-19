@@ -27,10 +27,9 @@ public struct Queue<Element: ~Copyable>: ~Copyable, Sendable {
 
   /// Splits the queue into one exclusive producer end, one exclusive
   /// consumer end and a supervisor — SPSC. Consumes the token.
-  public consuming func split(_ option: SPSCOption) -> QueueEnds<Element> {
-    cell.addProducer()
-    cell.addConsumer()
-    return QueueEnds(
+  public consuming func split(_ option: SPSCOption) -> SPSCQueueEnds<Element> {
+    cell.registerEnds()
+    return SPSCQueueEnds(
       producer: QueueProducer(cell: cell),
       consumer: QueueConsumer(cell: cell),
       supervisor: QueueSupervisor(cell: cell)
@@ -40,7 +39,7 @@ public struct Queue<Element: ~Copyable>: ~Copyable, Sendable {
   /// Splits the queue into a cloneable producer end, one exclusive consumer
   /// end and a supervisor — MPSC. Consumes the token.
   public consuming func split(_ option: MPSCOption) -> MPSCQueueEnds<Element> {
-    cell.addConsumer()
+    cell.registerEnds()
     return MPSCQueueEnds(
       producer: SharedQueueProducer(cell: cell),
       consumer: QueueConsumer(cell: cell),
@@ -51,7 +50,7 @@ public struct Queue<Element: ~Copyable>: ~Copyable, Sendable {
   /// Splits the queue into one exclusive producer end, a cloneable consumer
   /// end and a supervisor — SPMC. Consumes the token.
   public consuming func split(_ option: SPMCOption) -> SPMCQueueEnds<Element> {
-    cell.addProducer()
+    cell.registerEnds()
     return SPMCQueueEnds(
       producer: QueueProducer(cell: cell),
       consumer: SharedQueueConsumer(cell: cell),
@@ -62,7 +61,8 @@ public struct Queue<Element: ~Copyable>: ~Copyable, Sendable {
   /// Splits the queue into a cloneable producer end, a cloneable consumer
   /// end and a supervisor — MPMC. Consumes the token.
   public consuming func split(_ option: MPMCOption) -> MPMCQueueEnds<Element> {
-    MPMCQueueEnds(
+    cell.registerEnds()
+    return MPMCQueueEnds(
       producer: SharedQueueProducer(cell: cell),
       consumer: SharedQueueConsumer(cell: cell),
       supervisor: QueueSupervisor(cell: cell)
@@ -72,7 +72,7 @@ public struct Queue<Element: ~Copyable>: ~Copyable, Sendable {
 
 /// The three capabilities handed out by `Queue.split(.spsc)`: move-only.
 @frozen
-public struct QueueEnds<Element: ~Copyable>: ~Copyable, Sendable {
+public struct SPSCQueueEnds<Element: ~Copyable>: ~Copyable, Sendable {
   public let producer: QueueProducer<Element>
   public let consumer: QueueConsumer<Element>
   public let supervisor: QueueSupervisor<Element>
@@ -124,7 +124,7 @@ public struct SPMCQueueEnds<Element: ~Copyable>: ~Copyable, Sendable {
   }
 }
 
-/// The capabilities handed out by `Queue.split(.mpmc)`.
+/// The capabilities handed out by `Queue.split(.mpmc)`: move-only.
 @frozen
 public struct MPMCQueueEnds<Element: ~Copyable>: ~Copyable, Sendable {
   public let producer: SharedQueueProducer<Element>
@@ -164,16 +164,16 @@ public struct QueueProducer<Element: ~Copyable>: ~Copyable, Sendable {
 }
 
 /// Cloneable, `Sendable` producer end: any number of producers sharing one
-/// object.
+/// object. Minted by `split(.mpsc)` / `split(.mpmc)`.
 ///
-/// Production closes through `close()` or once every producer end (shared
-/// or unique) is released.
+/// Production closes through `close()` or once the last producer reference
+/// is released.
 public final class SharedQueueProducer<Element: ~Copyable>: Sendable {
   private let cell: QueueCell<Element>
 
-  init(cell: QueueCell<Element>) {
+  fileprivate init(cell: QueueCell<Element>) {
+    // The owning split registered both endpoint sides.
     self.cell = cell
-    cell.addProducer()
   }
 
   deinit {

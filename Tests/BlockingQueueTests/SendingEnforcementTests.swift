@@ -16,14 +16,6 @@ private enum CompileCheckError: Error {
   case productsNotFound
 }
 
-private var compileCheckSupported: Bool {
-  #if os(macOS)
-    return true
-  #else
-    return false
-  #endif
-}
-
 #if os(macOS)
   private func swiftcPath() throws -> String {
     let process = Process()
@@ -105,7 +97,7 @@ private var compileCheckSupported: Bool {
   /// A producer end must accept a non-`Sendable` element (control) and must
   /// reject using that element after the handoff (violation).
   private func expectSendingViolation(
-    producerType: String, products: String, swiftc: String
+    producerType: String, method: String, products: String, swiftc: String
   ) throws {
     let control = """
       import BlockingQueue
@@ -116,7 +108,7 @@ private var compileCheckSupported: Bool {
 
       func behave(_ producer: borrowing \(producerType)<Payload>) {
         let p = Payload()
-        producer.enqueue(p)
+        producer.\(method)(p)
       }
       """
 
@@ -129,7 +121,7 @@ private var compileCheckSupported: Bool {
 
       func violate(_ producer: borrowing \(producerType)<Payload>) {
         let p = Payload()
-        producer.enqueue(p)
+        producer.\(method)(p)
         p.v += 1
       }
       """
@@ -137,27 +129,60 @@ private var compileCheckSupported: Bool {
     let controlResult = try compile(control, products: products, swiftc: swiftc)
     #expect(
       controlResult.status == 0,
-      "\(producerType) control snippet must compile — got:\n\(controlResult.diagnostics)"
+      "\(producerType).\(method) control snippet must compile — got:\n\(controlResult.diagnostics)"
     )
 
     let violationResult = try compile(violation, products: products, swiftc: swiftc)
     #expect(
       violationResult.status != 0,
-      "\(producerType) use-after-enqueue must not compile"
+      "\(producerType).\(method) use-after-handoff must not compile"
     )
     #expect(
       violationResult.diagnostics.contains("sending"),
-      "expected the use-after-send diagnostic for \(producerType) — got:\n\(violationResult.diagnostics)"
+      "expected the use-after-send diagnostic for \(producerType).\(method) — got:\n\(violationResult.diagnostics)"
+    )
+  }
+
+  /// The `sending` return of `take()` and `drainAll()` must be usable as a
+  /// `sending` result; otherwise callers cannot move the value to another
+  /// isolation domain. Removing `sending` from those declarations fails this
+  /// compile with a `sending ... risks causing data races` diagnostic.
+  private func expectSendingResults(products: String, swiftc: String) throws {
+    let source = """
+      import BlockingQueue
+      import DequeModule
+
+      final class Payload {
+        var v = 0
+      }
+
+      func pullUnique(_ consumer: borrowing QueueConsumer<Payload>) -> sending Payload? {
+        consumer.take()
+      }
+
+      func pullShared(_ consumer: SharedQueueConsumer<Payload>) -> sending Payload? {
+        consumer.take()
+      }
+
+      func drain(_ supervisor: QueueSupervisor<Payload>) -> sending UniqueDeque<Payload> {
+        supervisor.drainAll()
+      }
+      """
+
+    let result = try compile(source, products: products, swiftc: swiftc)
+    #expect(
+      result.status == 0,
+      "take()/drainAll() must return sending values — got:\n\(result.diagnostics)"
     )
   }
 #endif
 
 /// Every producer end — exclusive and shared, unbounded and bounded — must
-/// enforce the `sending` handoff. Verified against the built module with a
-/// real compiler run, so the guarantee holds for ordinary cross-module
-/// clients of this library.
-@Test(.enabled(if: compileCheckSupported))
-func producerUseAfterEnqueueIsRejectedAtCompileTime() throws {
+/// enforce the `sending` handoff, and the consumer/supervisor returns must
+/// carry it across domains. Verified against the built module with real
+/// compiler runs, so the guarantees hold for ordinary cross-module clients.
+@Test
+func sendingHandoffIsEnforcedAtCompileTime() throws {
   #if os(macOS)
     let swiftc: String
     let products: String
@@ -169,13 +194,19 @@ func producerUseAfterEnqueueIsRejectedAtCompileTime() throws {
       return
     }
 
-    for producerType in [
-      "QueueProducer", "SharedQueueProducer",
-      "BoundedQueueProducer", "SharedBoundedQueueProducer",
-    ] {
+    let producerChecks: [(type: String, method: String)] = [
+      ("QueueProducer", "enqueue"),
+      ("SharedQueueProducer", "enqueue"),
+      ("BoundedQueueProducer", "enqueue"),
+      ("BoundedQueueProducer", "enqueueBlocking"),
+      ("SharedBoundedQueueProducer", "enqueue"),
+      ("SharedBoundedQueueProducer", "enqueueBlocking"),
+    ]
+    for check in producerChecks {
       try expectSendingViolation(
-        producerType: producerType, products: products, swiftc: swiftc
+        producerType: check.type, method: check.method, products: products, swiftc: swiftc
       )
     }
+    try expectSendingResults(products: products, swiftc: swiftc)
   #endif
 }

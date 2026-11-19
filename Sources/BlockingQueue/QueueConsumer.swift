@@ -30,12 +30,14 @@ public struct QueueConsumer<Element: ~Copyable>: ~Copyable, Sendable {
 /// Cloneable, `Sendable` consumer end: any number of takers sharing one
 /// object, competing per element. Minted by `split(.spmc)` /
 /// `split(.mpmc)`.
+///
+/// Releasing the last reference seals the queue from the consumer side.
 public final class SharedQueueConsumer<Element: ~Copyable>: Sendable {
   private let cell: QueueCell<Element>
 
   init(cell: QueueCell<Element>) {
+    // The owning split registered both endpoint sides.
     self.cell = cell
-    cell.addConsumer()
   }
 
   deinit {

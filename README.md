@@ -102,6 +102,15 @@ producer.enqueue(2)
 producer.close()
 ```
 
+Migrating from the previous split API:
+
+- `queue.split()` → `queue.split(.spsc)`.
+- `split()` followed by `producer.share()` → construct with `split(.mpsc)`;
+  use `split(.mpmc)` when the consumer side is shared as well.
+- `split()` followed by `consumer.share()` → `split(.spmc)` /
+  `split(.mpmc)`.
+- `finish()` and `close()` are unchanged.
+
 ## Build / test
 
 ```bash
