@@ -175,15 +175,13 @@ private enum CompileCheckError: Error {
       "take()/drainAll() must return sending values — got:\n\(result.diagnostics)"
     )
   }
-#endif
 
-/// Every producer end — exclusive and shared, unbounded and bounded — must
-/// enforce the `sending` handoff, and the consumer/supervisor returns must
-/// carry it across domains. Verified against the built module with real
-/// compiler runs, so the guarantees hold for ordinary cross-module clients.
-@Test
-func sendingHandoffIsEnforcedAtCompileTime() throws {
-  #if os(macOS)
+  /// Every producer end — exclusive and shared, unbounded and bounded — must
+  /// enforce the `sending` handoff, and the consumer/supervisor returns must
+  /// carry it across domains. Verified against the built module with real
+  /// compiler runs, so the guarantees hold for ordinary cross-module clients.
+  @Test
+  func sendingHandoffIsEnforcedAtCompileTime() throws {
     let swiftc: String
     let products: String
     do {
@@ -208,5 +206,5 @@ func sendingHandoffIsEnforcedAtCompileTime() throws {
       )
     }
     try expectSendingResults(products: products, swiftc: swiftc)
-  #endif
-}
+  }
+#endif

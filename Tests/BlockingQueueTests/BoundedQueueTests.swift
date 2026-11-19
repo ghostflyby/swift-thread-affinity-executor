@@ -171,7 +171,6 @@ import Testing
   let drained = consumer.take()
   #expect(drained == nil)
   #expect(supervisor.isSealed)
-  release(consumer)
 }
 
 /// `.spmc`'s exclusive producer wakes when a shared taker frees a bounded

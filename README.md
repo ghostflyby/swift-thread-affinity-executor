@@ -105,6 +105,8 @@ producer.close()
 Migrating from the previous split API:
 
 - `queue.split()` → `queue.split(.spsc)`.
+- `QueueEnds` / `BoundedQueueEnds` → `SPSCQueueEnds` /
+  `BoundedSPSCQueueEnds`.
 - `split()` followed by `producer.share()` → construct with `split(.mpsc)`;
   use `split(.mpmc)` when the consumer side is shared as well.
 - `split()` followed by `consumer.share()` → `split(.spmc)` /

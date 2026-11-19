@@ -79,7 +79,6 @@ import Testing
   let drained = consumer.take()
   #expect(drained == nil)
   #expect(supervisor.isSealed)
-  release(consumer)
 }
 
 @Test func blockedTakeWakesOnEnqueue() async {
