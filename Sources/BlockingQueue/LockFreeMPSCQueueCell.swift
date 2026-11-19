@@ -13,35 +13,49 @@
 import Foundation
 import Synchronization
 
-/// One list node: a link plus an optional element. Nodes are allocated with
-/// `UnsafeMutablePointer` and destroyed explicitly by the consumer on take, or
-/// by the cell's `deinit` when the queue is released without draining. The
-/// element is optional because every consumed node becomes the empty stub the
-/// next take reads from.
+/// One list node: a link plus optional element storage. Nodes are allocated
+/// with `UnsafeMutablePointer`; the element lives in its own allocation so the
+/// consumer's move stays disjoint from a producer's concurrent link write.
+/// The head is always empty: either the initial stub or a node whose element
+/// was moved out (its storage pointer is left dangling and never used again).
 private struct LockFreeMPSCQueueNode<Element: ~Copyable>: ~Copyable {
   /// Next node, `nil` until a producer links it.
   let next: Atomic<UnsafeMutablePointer<LockFreeMPSCQueueNode<Element>>?>
 
-  var element: Element?
+  private var storage: UnsafeMutablePointer<Element>?
 
   init(element: consuming Element) {
     next = Atomic<UnsafeMutablePointer<LockFreeMPSCQueueNode<Element>>?>(nil)
-    self.element = consume element
+    let storage = UnsafeMutablePointer<Element>.allocate(capacity: 1)
+    storage.initialize(to: consume element)
+    self.storage = storage
   }
 
   /// The empty stub the head starts on and every consumed node becomes.
   init() {
     next = Atomic<UnsafeMutablePointer<LockFreeMPSCQueueNode<Element>>?>(nil)
-    element = nil
+    storage = nil
   }
 
-  /// Moves the element out. Only the single consumer calls this, and only for
-  /// nodes produced with an element — never for the initial stub.
-  mutating func takeElement() -> Element {
-    guard let value = element.take() else {
+  /// Moves the element out without mutating `self`. Only the single consumer
+  /// calls this, and only for nodes produced with an element. The node becomes
+  /// the head stub; `storage` keeps a dangling pointer that must not be freed
+  /// again.
+  func takeElement() -> Element {
+    guard let storage else {
       preconditionFailure("lock-free MPSC node has no element")
     }
+    let value = storage.move()
+    storage.deallocate()
     return value
+  }
+
+  /// Frees the element of a node that is still queued. The head stub is never
+  /// passed here: its storage is `nil` or already freed by `takeElement()`.
+  func deallocateStorage() {
+    guard let storage else { return }
+    storage.deinitialize(count: 1)
+    storage.deallocate()
   }
 }
 
@@ -74,6 +88,7 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
   private let producerCount = Atomic<Int>(0)
   private let consumerCount = Atomic<Int>(0)
   private let waitingConsumers = Atomic<Int>(0)
+  private let takerActive = Atomic<Bool>(false)
   private let elementCondition = NSCondition()
   private let sealCondition = NSCondition()
 
@@ -85,11 +100,16 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
   }
 
   deinit {
-    // The cell outlives every end and therefore every in-flight operation:
-    // walk the remaining chain and destroy the nodes the queue still owns.
-    var current: UnsafeMutablePointer<Node>? = head.load(ordering: .relaxed)
+    // The cell outlives every end and therefore every in-flight operation.
+    // The head is the current stub: its element storage is nil or already
+    // freed by a take, so only its successors still own element storage.
+    let headNode = head.load(ordering: .relaxed)
+    var current = headNode.pointee.next.load(ordering: .relaxed)
+    headNode.deinitialize(count: 1)
+    headNode.deallocate()
     while let node = current {
       let next = node.pointee.next.load(ordering: .relaxed)
+      node.pointee.deallocateStorage()
       node.deinitialize(count: 1)
       node.deallocate()
       current = next
@@ -113,11 +133,14 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
       return false
     }
 
+    // Increment before publishing: the consumer's acquire load of the link
+    // then orders this increment before its decrement, so `count` cannot go
+    // negative. In-flight increments may temporarily over-count.
+    count.wrappingAdd(1, ordering: .relaxed)
     let node = UnsafeMutablePointer<Node>.allocate(capacity: 1)
     node.initialize(to: Node(element: element))
     let previous = tail.exchange(node, ordering: .acquiringAndReleasing)
     previous.pointee.next.store(node, ordering: .releasing)
-    count.wrappingAdd(1, ordering: .relaxed)
     activeProducers.wrappingSubtract(1, ordering: .sequentiallyConsistent)
     atomicMemoryFence(ordering: .sequentiallyConsistent)
     wakeConsumerIfNeeded()
@@ -135,8 +158,34 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
   }
 
   /// Removes and returns the element at the front, or `nil` when none is
-  /// currently linked. Never waits.
+  /// currently linked. Never waits. Observing a closed, fully drained queue
+  /// seals it, like the terminal return of `take()`.
   func tryTake() -> Element? {
+    enterTaker()
+    defer { leaveTaker() }
+    guard let element = takeIfAvailable() else {
+      if isTerminal() {
+        markSealed()
+      }
+      return nil
+    }
+    return element
+  }
+
+  /// Serializes the single legal taker. Concurrent entry would double-free
+  /// the head node, so it traps instead of corrupting memory.
+  private func enterTaker() {
+    let (acquired, _) = takerActive.compareExchange(
+      expected: false, desired: true, ordering: .acquiringAndReleasing)
+    precondition(acquired, "lock-free MPSC consumer used concurrently")
+  }
+
+  private func leaveTaker() {
+    takerActive.store(false, ordering: .releasing)
+  }
+
+  /// The unguarded dequeue shared by `tryTake()` and `take()`.
+  private func takeIfAvailable() -> Element? {
     let headNode = head.load(ordering: .acquiring)
     guard let next = headNode.pointee.next.load(ordering: .acquiring) else {
       return nil
@@ -145,7 +194,9 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
     head.store(next, ordering: .releasing)
     headNode.pointee.next.store(nil, ordering: .relaxed)
     let element = next.pointee.takeElement()
-    headNode.deinitialize(count: 1)
+    // The old head is always the empty stub: its element storage is nil or
+    // already freed by a take. Deallocate the node without touching that
+    // pointer.
     headNode.deallocate()
     count.wrappingSubtract(1, ordering: .relaxed)
     return element
@@ -154,8 +205,10 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
   /// Blocks until an element is available or the terminal state is reached.
   /// `nil` seals the queue in the same critical section that observed it.
   func take() -> Element? {
+    enterTaker()
+    defer { leaveTaker() }
     while true {
-      if let element = tryTake() {
+      if let element = takeIfAvailable() {
         return element
       }
 
@@ -163,7 +216,7 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
       waitingConsumers.wrappingAdd(1, ordering: .relaxed)
       atomicMemoryFence(ordering: .sequentiallyConsistent)
 
-      if let element = tryTake() {
+      if let element = takeIfAvailable() {
         waitingConsumers.wrappingSubtract(1, ordering: .relaxed)
         elementCondition.unlock()
         return element
@@ -192,6 +245,9 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
   }
 
   private func markSealed() {
+    if sealed.load(ordering: .sequentiallyConsistent) {
+      return
+    }
     sealCondition.lock()
     sealed.store(true, ordering: .sequentiallyConsistent)
     sealCondition.broadcast()
@@ -205,8 +261,9 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
     elementCondition.unlock()
   }
 
-  /// Registers both sides of one split in the same critical section. Every
-  /// split calls this exactly once; releasing the matching end decrements it.
+  /// Registers both endpoint sides before `split` returns. The two relaxed
+  /// increments need no shared critical section: the ends are not published
+  /// until the split call completes.
   func registerEnds() {
     producerCount.wrappingAdd(1, ordering: .relaxed)
     consumerCount.wrappingAdd(1, ordering: .relaxed)

@@ -137,13 +137,17 @@ while let value = ends.consumer.take() {  // blocks; nil after close + drain
 }
 ```
 
-`tryTake()` is the non-blocking dequeue; its `nil` means "currently empty",
-not "sealed". `take()` parks on a condition variable, and a producer takes
-that condition only when a consumer is parked — the data path stays
-lock-free. `close()` racing with `enqueue` is linearized: an element accepted
-by `enqueue` is delivered, and the queue does not seal around an in-flight
-producer. The consumer end is exclusive by type, so the supervisor exposes no
-`drainAll`; drain through the consumer.
+`tryTake()` is the non-blocking dequeue; its `nil` means "currently empty".
+An empty observation of a closed queue also seals it, so draining with
+`tryTake()` is terminal for the supervisor. `take()` parks on a condition
+variable, and a producer takes that condition only when a consumer is parked —
+the data path stays lock-free. `close()` racing with `enqueue` is linearized:
+an element accepted by `enqueue` is delivered, and the queue does not seal
+around an in-flight producer. There is one consumer end; `take()`/`tryTake()`
+must be called from one thread at a time. `~Copyable` prevents duplicating the
+end but not concurrent borrows through a shared holder, so the cell traps on
+concurrent entry. The supervisor exposes no `drainAll`; drain through the
+consumer.
 
 ## Build / test
 
@@ -160,7 +164,7 @@ Requires a Swift 6.4+ toolchain. Deployment floors: macOS 15 / iOS 18 / tvOS 18 
 - An executor attached to the main thread via `MainQueueDispatcher` shares the thread with `MainActor` but is not the same executor identity and does not replace it.
 - `MigratingThreadExecutor.migrate(to:)` and `handOver(to:)` require a successor pump whose fixed thread or queue is independent of the currently serving pump — a different wrapper around the same thread or queue still deadlocks. The handshake post queues behind the old serving loop, which exits only after retarget seals its queue, and retarget waits for the handshake. The handshake itself no longer blocks the successor's thread while the old generation drains; the serving loop is posted after the old finalize.
 - `FixedThreadDispatcher.post` returns `false` once the pump stops accepting work. Attachment and migration handshakes surface that as `AttachError.pumpUnavailable` / `MigrationError.pumpUnavailable`; `detach()` returns `false` when the finalize post is rejected instead of blocking forever. A pump that accepts a post but never runs it still leaves the join pending.
-- `LockFreeMPSCQueue` allocates one node per enqueued element and keeps it until the consumer takes it (or the queue is released). A blocking `take()` parks on an `NSCondition`; producers take that lock only when a consumer is parked, so enqueue is lock-free in the common case but a parked consumer adds a mutex-based wake path. Its supervisor has no `drainAll`: the consumer end is exclusive, and a second taker would break the single-consumer head advance.
+- `LockFreeMPSCQueue` allocates a node plus its element storage per enqueued element and keeps them until the consumer takes it (or the queue is released). A blocking `take()` parks on an `NSCondition`; producers take that lock only when a consumer is parked, so enqueue is lock-free in the common case but a parked consumer adds a mutex-based wake path. Its supervisor has no `drainAll`: there is one consumer end, and a second taker would break the single-consumer head advance. The consumer cell traps on concurrent `take()`/`tryTake()` entry, so a shared holder cannot silently double-free the head.
 
 ## License
 

@@ -96,8 +96,10 @@ public final class LockFreeMPSCQueueProducer<Element: ~Copyable>: Sendable {
   }
 }
 
-/// Single, move-only consumer end. Only one taker may exist, and only the
-/// taker may advance the queue.
+/// Single, move-only consumer end. Only one taker may exist, and only one
+/// call may be in flight at a time: `~Copyable` prevents duplicating the end,
+/// but a shared holder can still borrow it concurrently, so the cell traps on
+/// concurrent entry.
 ///
 /// `tryTake()` never waits; `take()` parks on a condition variable until an
 /// element is available or the queue is closed and drained. The data path
@@ -116,8 +118,9 @@ public struct LockFreeMPSCQueueConsumer<Element: ~Copyable>: ~Copyable, Sendable
   }
 
   /// Removes and returns the front element, or `nil` when nothing is
-  /// currently linked. Never waits: unlike `take()`, `nil` does not mean
-  /// the queue is sealed.
+  /// currently linked. Never waits. An empty observation of a closed queue
+  /// seals it, so draining with `tryTake()` still makes
+  /// `supervisor.isSealed` / `waitUntilSealed()` terminal.
   ///
   /// The element is handed over (`sending`).
   @discardableResult
@@ -128,8 +131,8 @@ public struct LockFreeMPSCQueueConsumer<Element: ~Copyable>: ~Copyable, Sendable
   /// Blocks until an element is available, then removes and returns it from
   /// the front.
   ///
-  /// Returns `nil` once the queue is closed and fully drained (or no
-  /// consumer end remains); that observation seals the queue.
+  /// Returns `nil` once the queue is closed and fully drained; that
+  /// observation seals the queue.
   @available(*, noasync)
   @discardableResult
   public func take() -> sending Element? {
@@ -161,13 +164,15 @@ public final class LockFreeMPSCQueueSupervisor<Element: ~Copyable>: Sendable {
     cell.isClosed
   }
 
-  /// Terminal state: closed and fully drained, or no consumer end remains.
+  /// Terminal state: closed, fully drained and free of in-flight producers,
+  /// or no consumer end remains.
   public var isSealed: Bool {
     cell.isSealed
   }
 
   /// Number of elements currently queued. Approximate under concurrent
-  /// producers and takers.
+  /// producers and takers; in-flight enqueues may transiently over-count, and
+  /// the value never goes negative.
   public var count: Int {
     cell.elementCount
   }

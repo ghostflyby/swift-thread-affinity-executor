@@ -107,6 +107,86 @@ private func waitForParkedConsumer<Element: ~Copyable>(
   release(consumer)
 }
 
+/// Draining a closed queue with the non-blocking dequeue must reach the same
+/// terminal state as a blocking take, or `waitUntilSealed()` would hang.
+@Test func lockFreeTryTakeSealsClosedDrainedQueue() {
+  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let producer = ends.producer
+  let consumer = ends.consumer
+  let supervisor = ends.supervisor
+
+  #expect(producer.enqueue(1))
+  producer.close()
+  #expect(consumer.tryTake() == 1)
+  #expect(supervisor.isSealed == false)
+
+  #expect(consumer.tryTake() == nil)
+  #expect(supervisor.isSealed)
+
+  let sealed = DispatchSemaphore(value: 0)
+  let waiter = Thread {
+    supervisor.waitUntilSealed()
+    sealed.signal()
+  }
+  waiter.start()
+  #expect(sealed.wait(timeout: .now() + 2) == .success)
+  release(consumer)
+}
+
+/// The count increment must happen-before the link that makes an element
+/// visible; otherwise a concurrent take can decrement first and expose a
+/// negative element count.
+@Test func lockFreeCountNeverGoesNegativeUnderConcurrency() {
+  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let producer = ends.producer
+  let consumer = ends.consumer
+  let supervisor = ends.supervisor
+
+  let producerCount = 4
+  let perProducer = 5_000
+  let total = producerCount * perProducer
+  let done = Atomic<Bool>(false)
+  let group = DispatchGroup()
+  for p in 0..<producerCount {
+    DispatchQueue.global().async(group: group) {
+      for i in 0..<perProducer {
+        #expect(producer.enqueue(p * perProducer + i))
+      }
+    }
+  }
+  group.notify(queue: .global()) {
+    producer.close()
+    done.store(true, ordering: .releasing)
+  }
+
+  var received = 0
+  var sawNegative = false
+  while true {
+    if consumer.tryTake() != nil {
+      received += 1
+      if supervisor.count < 0 {
+        sawNegative = true
+      }
+      continue
+    }
+    if done.load(ordering: .acquiring) {
+      while consumer.tryTake() != nil {
+        received += 1
+        if supervisor.count < 0 {
+          sawNegative = true
+        }
+      }
+      break
+    }
+    Thread.sleep(forTimeInterval: 0.0001)
+  }
+
+  #expect(received == total)
+  #expect(sawNegative == false)
+  #expect(supervisor.isSealed)
+  release(consumer)
+}
+
 @Test func lockFreeBlockedTakeWakesOnEnqueue() {
   let ends = LockFreeMPSCQueue<String>().split(.mpsc)
   let producer = ends.producer
