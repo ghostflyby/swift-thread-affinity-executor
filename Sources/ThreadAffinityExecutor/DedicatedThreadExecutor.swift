@@ -68,8 +68,8 @@ public final class DedicatedThreadExecutor: ThreadBoundExecutor, @unchecked Send
     name: String? = nil,
     lifecycle: any ThreadLifecycleDelegate = ClosureLifecycle()
   ) throws {
-    let ends = Queue<UnownedJob>().split()
-    self.producer = ends.producer.share()
+    let ends = Queue<UnownedJob>().split(.mpsc)
+    self.producer = ends.producer
     self.consumer = ends.consumer
     self.supervisor = ends.supervisor
     self.lifecycle = lifecycle

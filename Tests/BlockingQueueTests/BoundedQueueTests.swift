@@ -97,8 +97,8 @@ import Testing
 }
 
 @Test func sharedBoundedProducerFillUpToCapacity() async {
-  let ends = BoundedQueue<Int>(capacity: 3).split()
-  let producer = ends.producer.share()
+  let ends = BoundedQueue<Int>(capacity: 3).split(.mpsc)
+  let producer = ends.producer
 
   let accepted = await withTaskGroup(of: Int.self) { group in
     for _ in 0..<10 {
@@ -262,9 +262,9 @@ import Testing
 /// meant for a blocked consumer: the queue only uses a single signal when
 /// the consumer class is the sole waiter class.
 @Test func enqueueWakesConsumerDespiteSealedWaiter() {
-  let ends = BoundedQueue<Int>(capacity: 2).split()
-  let producer = ends.producer.share()
-  let consumer = ends.consumer.share()
+  let ends = BoundedQueue<Int>(capacity: 2).split(.mpmc)
+  let producer = ends.producer
+  let consumer = ends.consumer
   let supervisor = ends.supervisor
 
   let took = DispatchSemaphore(value: 0)
@@ -293,9 +293,9 @@ import Testing
 /// Symmetric case: a blocked producer must be woken even when a sealed
 /// waiter shares the condition, so a freed bounded slot is not lost.
 @Test func takeWakesProducerDespiteSealedWaiter() {
-  let ends = BoundedQueue<Int>(capacity: 1).split()
-  let producer = ends.producer.share()
-  let consumer = ends.consumer.share()
+  let ends = BoundedQueue<Int>(capacity: 1).split(.mpmc)
+  let producer = ends.producer
+  let consumer = ends.consumer
   let supervisor = ends.supervisor
 
   #expect(producer.enqueue(1))

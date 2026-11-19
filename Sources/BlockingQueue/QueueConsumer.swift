@@ -6,7 +6,9 @@
 /// Single, move-only consumer end. `take()` blocks until an element is
 /// available; `nil` means the queue is sealed.
 ///
-/// Releasing the end seals the queue from the consumer side.
+/// Minted by `split()` / `split(.spsc)` / `split(.mpsc)`. Releasing the end
+/// seals the queue from the consumer side. There is no `share()` upgrade:
+/// the endpoint shape is fixed at split time.
 public struct QueueConsumer<Element: ~Copyable>: ~Copyable, Sendable {
   let cell: QueueCell<Element>
 
@@ -20,22 +22,14 @@ public struct QueueConsumer<Element: ~Copyable>: ~Copyable, Sendable {
     cell.take()
   }
 
-  /// Upgrades this end into a cloneable, `Sendable` consumer.
-  public consuming func share() -> SharedQueueConsumer<Element> {
-    let shared = SharedQueueConsumer(cell: cell)
-    // Pin `self` past the registration above so its deinit disconnects this
-    // end only after the shared end registered (count 1 → 2 → 1).
-    withExtendedLifetime(self) {}
-    return shared
-  }
-
   deinit {
     cell.removeConsumer()
   }
 }
 
 /// Cloneable, `Sendable` consumer end: any number of takers sharing one
-/// object, competing per element.
+/// object, competing per element. Minted by `split(.spmc)` /
+/// `split(.mpmc)`.
 public final class SharedQueueConsumer<Element: ~Copyable>: Sendable {
   private let cell: QueueCell<Element>
 

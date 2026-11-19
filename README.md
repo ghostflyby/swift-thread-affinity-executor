@@ -6,7 +6,7 @@ Thread-affinity executors for Swift Concurrency: every job accepted by one of th
 
 | Type | Notes | Status |
 | --- | --- | --- |
-| `BlockingQueue` (separate library product) | Split-endpoint blocking FIFO queues (`Queue` unbounded / `BoundedQueue` fixed capacity); elements cross by ownership transfer (`sending`) | ✅ |
+| `BlockingQueue` (separate library product) | Split-endpoint blocking FIFO queues (`Queue` unbounded / `BoundedQueue` fixed capacity); endpoint shape fixed at split time — `split()` / `split(.spsc)` / `.mpsc` / `.spmc` / `.mpmc`; elements cross by ownership transfer (`sending`) | ✅ |
 | `ThreadID` | Cross-platform OS thread ID value type | ✅ |
 | `ThreadBoundExecutor` | `SerialExecutor + TaskExecutor` protocol bound to one OS thread | ✅ |
 | `DedicatedThreadExecutor` | Dedicated `Foundation.Thread` with optional on-thread `initialize`/`finalize` | ✅ |
