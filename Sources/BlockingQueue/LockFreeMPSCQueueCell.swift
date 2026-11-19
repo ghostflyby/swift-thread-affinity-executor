@@ -13,41 +13,34 @@
 import Foundation
 import Synchronization
 
-/// One list node. The element lives in manually-managed storage so it can be
-/// moved out exactly once, whether that happens in `takeElement()` or in the
-/// node's own `deinit` when the queue is released without draining.
-private final class LockFreeMPSCQueueNode<Element: ~Copyable>: @unchecked Sendable {
+/// One list node: a link plus an optional element. Nodes are allocated with
+/// `UnsafeMutablePointer` and destroyed explicitly by the consumer on take, or
+/// by the cell's `deinit` when the queue is released without draining. The
+/// element is optional because every consumed node becomes the empty stub the
+/// next take reads from.
+private struct LockFreeMPSCQueueNode<Element: ~Copyable>: ~Copyable {
   /// Next node, `nil` until a producer links it.
-  let next = Atomic<Unmanaged<LockFreeMPSCQueueNode<Element>>?>(nil)
-  private var storage: UnsafeMutablePointer<Element>?
+  let next: Atomic<UnsafeMutablePointer<LockFreeMPSCQueueNode<Element>>?>
+
+  var element: Element?
 
   init(element: consuming Element) {
-    let storage = UnsafeMutablePointer<Element>.allocate(capacity: 1)
-    storage.initialize(to: consume element)
-    self.storage = storage
+    next = Atomic<UnsafeMutablePointer<LockFreeMPSCQueueNode<Element>>?>(nil)
+    self.element = consume element
   }
 
   /// The empty stub the head starts on and every consumed node becomes.
   init() {
-    storage = nil
-  }
-
-  deinit {
-    if let storage {
-      storage.deinitialize(count: 1)
-      storage.deallocate()
-    }
+    next = Atomic<UnsafeMutablePointer<LockFreeMPSCQueueNode<Element>>?>(nil)
+    element = nil
   }
 
   /// Moves the element out. Only the single consumer calls this, and only for
   /// nodes produced with an element — never for the initial stub.
-  func takeElement() -> Element {
-    guard let storage else {
+  mutating func takeElement() -> Element {
+    guard let value = element.take() else {
       preconditionFailure("lock-free MPSC node has no element")
     }
-    self.storage = nil
-    let value = storage.move()
-    storage.deallocate()
     return value
   }
 }
@@ -72,8 +65,8 @@ private final class LockFreeMPSCQueueNode<Element: ~Copyable>: @unchecked Sendab
 final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
   private typealias Node = LockFreeMPSCQueueNode<Element>
 
-  private let head: Atomic<Unmanaged<Node>>
-  private let tail: Atomic<Unmanaged<Node>>
+  private let head: Atomic<UnsafeMutablePointer<Node>>
+  private let tail: Atomic<UnsafeMutablePointer<Node>>
   private let closed = Atomic<Bool>(false)
   private let sealed = Atomic<Bool>(false)
   private let count = Atomic<Int>(0)
@@ -85,24 +78,26 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
   private let sealCondition = NSCondition()
 
   init() {
-    let stub = Unmanaged.passRetained(Node())
+    let stub = UnsafeMutablePointer<Node>.allocate(capacity: 1)
+    stub.initialize(to: Node())
     head = Atomic(stub)
     tail = Atomic(stub)
   }
 
   deinit {
     // The cell outlives every end and therefore every in-flight operation:
-    // walk the remaining chain and release the nodes the queue still owns.
-    var current: Unmanaged<Node>? = head.load(ordering: .relaxed)
+    // walk the remaining chain and destroy the nodes the queue still owns.
+    var current: UnsafeMutablePointer<Node>? = head.load(ordering: .relaxed)
     while let node = current {
-      let next = node.takeUnretainedValue().next.load(ordering: .relaxed)
-      node.release()
+      let next = node.pointee.next.load(ordering: .relaxed)
+      node.deinitialize(count: 1)
+      node.deallocate()
       current = next
     }
   }
 
-  private func nextValue() -> Unmanaged<Node>? {
-    head.load(ordering: .acquiring).takeUnretainedValue().next.load(ordering: .acquiring)
+  private func nextValue() -> UnsafeMutablePointer<Node>? {
+    head.load(ordering: .acquiring).pointee.next.load(ordering: .acquiring)
   }
 
   /// Appends `element`. Never waits and never fails for capacity: the queue is
@@ -118,10 +113,10 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
       return false
     }
 
-    let node = Node(element: element)
-    let nodeValue = Unmanaged.passRetained(node)
-    let previousValue = tail.exchange(nodeValue, ordering: .acquiringAndReleasing)
-    previousValue.takeUnretainedValue().next.store(nodeValue, ordering: .releasing)
+    let node = UnsafeMutablePointer<Node>.allocate(capacity: 1)
+    node.initialize(to: Node(element: element))
+    let previous = tail.exchange(node, ordering: .acquiringAndReleasing)
+    previous.pointee.next.store(node, ordering: .releasing)
     count.wrappingAdd(1, ordering: .relaxed)
     activeProducers.wrappingSubtract(1, ordering: .sequentiallyConsistent)
     atomicMemoryFence(ordering: .sequentiallyConsistent)
@@ -143,14 +138,15 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
   /// currently linked. Never waits.
   func tryTake() -> Element? {
     let headNode = head.load(ordering: .acquiring)
-    guard let next = headNode.takeUnretainedValue().next.load(ordering: .acquiring) else {
+    guard let next = headNode.pointee.next.load(ordering: .acquiring) else {
       return nil
     }
 
     head.store(next, ordering: .releasing)
-    headNode.takeUnretainedValue().next.store(nil, ordering: .relaxed)
-    let element = next.takeUnretainedValue().takeElement()
-    headNode.release()
+    headNode.pointee.next.store(nil, ordering: .relaxed)
+    let element = next.pointee.takeElement()
+    headNode.deinitialize(count: 1)
+    headNode.deallocate()
     count.wrappingSubtract(1, ordering: .relaxed)
     return element
   }
