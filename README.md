@@ -6,7 +6,7 @@ Thread-affinity executors for Swift Concurrency: every job accepted by one of th
 
 | Type | Notes | Status |
 | --- | --- | --- |
-| `BlockingQueue` (separate library product) | Split-endpoint blocking FIFO queues (`Queue` unbounded / `BoundedQueue` fixed capacity); elements cross by ownership transfer (`sending`) | ✅ |
+| `BlockingQueue` (separate library product) | Split-endpoint blocking FIFO queues (`Queue` unbounded / `BoundedQueue` fixed capacity); endpoint shape fixed at split time — `split(.spsc)` / `.mpsc` / `.spmc` / `.mpmc`; elements cross by ownership transfer (`sending`) | ✅ |
 | `ThreadID` | Cross-platform OS thread ID value type | ✅ |
 | `ThreadBoundExecutor` | `SerialExecutor + TaskExecutor` protocol bound to one OS thread | ✅ |
 | `DedicatedThreadExecutor` | Dedicated `Foundation.Thread` with optional on-thread `initialize`/`finalize` | ✅ |
@@ -71,6 +71,47 @@ let mainExecutor = try await AttachedThreadExecutor.attach(to: MainQueueDispatch
 // any fixed-thread loop that provides a post entry:
 let executor = try await AttachedThreadExecutor.attach(to: myEventLoopDispatcher)
 ```
+
+### Queue endpoint shapes
+
+`BlockingQueue` fixes the endpoint shape when the construction token is
+split. Exclusive ends have no `share()` upgrade, so the shape is a static
+guarantee:
+
+| Shape | Split call | Producer | Consumer |
+| --- | --- | --- | --- |
+| SPSC | `split(.spsc)` | `QueueProducer` / `BoundedQueueProducer` | `QueueConsumer` |
+| MPSC | `split(.mpsc)` | `SharedQueueProducer` / `SharedBoundedQueueProducer` | `QueueConsumer` |
+| SPMC | `split(.spmc)` | `QueueProducer` / `BoundedQueueProducer` | `SharedQueueConsumer` |
+| MPMC | `split(.mpmc)` | `SharedQueueProducer` / `SharedBoundedQueueProducer` | `SharedQueueConsumer` |
+
+```swift
+import BlockingQueue
+
+let ends = Queue<Int>().split(.spsc)
+ends.producer.enqueue(1)
+ends.producer.finish()
+
+let first = ends.consumer.take() // 1
+let drained = ends.consumer.take() // nil
+
+// Bounded MPSC: the producer end is a cloneable, Sendable class reference.
+let bounded = BoundedQueue<Int>(capacity: 8).split(.mpsc)
+let producer = bounded.producer
+producer.enqueue(2)
+producer.close()
+```
+
+Migrating from the previous split API:
+
+- `queue.split()` → `queue.split(.spsc)`.
+- `QueueEnds` / `BoundedQueueEnds` → `SPSCQueueEnds` /
+  `BoundedSPSCQueueEnds`.
+- `split()` followed by `producer.share()` → construct with `split(.mpsc)`;
+  use `split(.mpmc)` when the consumer side is shared as well.
+- `split()` followed by `consumer.share()` → `split(.spmc)` /
+  `split(.mpmc)`.
+- `finish()` and `close()` are unchanged.
 
 ## Build / test
 

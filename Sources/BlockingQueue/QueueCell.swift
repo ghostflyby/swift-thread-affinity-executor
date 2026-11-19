@@ -135,9 +135,13 @@ final class QueueCell<Element: ~Copyable>: @unchecked Sendable {
     condition.broadcast()
   }
 
-  func addProducer() {
+  /// Registers both sides of one split in the same critical section. The
+  /// matching ends decrement their side in `deinit`; every split must call
+  /// this exactly once, regardless of which ends are shared.
+  func registerEnds() {
     condition.lock()
     producerCount += 1
+    consumerCount += 1
     condition.unlock()
   }
 
@@ -150,12 +154,6 @@ final class QueueCell<Element: ~Copyable>: @unchecked Sendable {
     }
     condition.unlock()
     condition.broadcast()
-  }
-
-  func addConsumer() {
-    condition.lock()
-    consumerCount += 1
-    condition.unlock()
   }
 
   /// Releasing the last consumer end seals the queue.
@@ -189,6 +187,13 @@ final class QueueCell<Element: ~Copyable>: @unchecked Sendable {
     condition.lock()
     defer { condition.unlock() }
     return sealed
+  }
+
+  /// Test/diagnostic snapshot of the waiters parked on the shared condition.
+  var waiterSnapshot: (producers: Int, consumers: Int, sealed: Int) {
+    condition.lock()
+    defer { condition.unlock() }
+    return (waitingProducers, waitingConsumers, waitingSealed)
   }
 
   var count: Int {

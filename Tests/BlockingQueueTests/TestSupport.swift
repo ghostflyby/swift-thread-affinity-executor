@@ -4,7 +4,10 @@
 //
 
 import Dispatch
+import Foundation
 import Synchronization
+import Testing
+@testable import BlockingQueue
 
 /// Waits for `semaphore` without occupying a cooperative thread. Under the
 /// default parallel test scheduler, blocking a cooperative thread can keep
@@ -51,6 +54,35 @@ final class Collector: Sendable {
 /// Consumes a move-only value so its deinit (and its disconnect effect)
 /// runs deterministically.
 func release<T: ~Copyable>(_ value: consuming T) {}
+
+/// Blocks until the queue's parked-waiter counts reach the requested values.
+///
+/// Wake-policy tests need both waiter classes registered before the state
+/// change that decides between `signal` and `broadcast`; a fixed sleep only
+/// guesses. Polls the internal snapshot and fails loudly if the waiters never
+/// register.
+func waitForWaiters<Element: ~Copyable>(
+  _ supervisor: QueueSupervisor<Element>,
+  producers: Int = 0,
+  consumers: Int = 0,
+  sealed: Int = 0,
+  timeout: TimeInterval = 2
+) {
+  let deadline = Date().addingTimeInterval(timeout)
+  while Date() < deadline {
+    let snapshot = supervisor.cell.waiterSnapshot
+    if snapshot.producers >= producers,
+      snapshot.consumers >= consumers,
+      snapshot.sealed >= sealed
+    {
+      return
+    }
+    Thread.sleep(forTimeInterval: 0.001)
+  }
+  Issue.record(
+    "timed out waiting for waiters: expected producers>=\(producers), consumers>=\(consumers), sealed>=\(sealed); got \(supervisor.cell.waiterSnapshot)"
+  )
+}
 
 /// Deliberately non-`Sendable` reference payload: proves queue elements
 /// need only ownership transfer, not concurrent shareability.

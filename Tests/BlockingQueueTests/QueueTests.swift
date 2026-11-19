@@ -9,7 +9,7 @@ import Foundation
 import Testing
 
 @Test func fifoOrderWithUniqueEnds() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
 
   for i in 0..<100 {
     let accepted = ends.producer.enqueue(i)
@@ -27,9 +27,63 @@ import Testing
   release(ends.consumer)
 }
 
+/// `split(.spsc)` mints the exclusive producer/consumer ends.
+@Test func spscOptionMintsExclusiveEnds() {
+  let ends = Queue<Int>().split(.spsc)
+
+  let accepted = ends.producer.enqueue(1)
+  #expect(accepted)
+  let first = ends.consumer.take()
+  #expect(first == 1)
+  ends.producer.finish()
+
+  let drained = ends.consumer.take()
+  #expect(drained == nil)
+  #expect(ends.supervisor.isSealed)
+  release(ends.consumer)
+}
+
+/// `.mpsc` mints a cloneable producer end while the consumer side stays
+/// exclusive; sharing the class reference feeds the one consumer.
+@Test func sharedProducerFeedsExclusiveConsumer() {
+  let ends = Queue<Int>().split(.mpsc)
+  let producer = ends.producer
+  let clone = producer
+
+  #expect(clone.enqueue(1))
+  #expect(producer.enqueue(2))
+  producer.close()
+
+  let first = ends.consumer.take()
+  #expect(first == 1)
+  let second = ends.consumer.take()
+  #expect(second == 2)
+  let drained = ends.consumer.take()
+  #expect(drained == nil)
+  #expect(ends.supervisor.isSealed)
+  release(ends.consumer)
+}
+
+/// Releasing the last shared-producer reference closes production even
+/// without an explicit `close()`.
+@Test func sharedProducerReleaseClosesProduction() {
+  let ends = Queue<Int>().split(.mpmc)
+  let consumer = ends.consumer
+  let supervisor = ends.supervisor
+  #expect(supervisor.isClosed == false)
+
+  // dropping the ends' shared-producer reference closes production
+  release(ends)
+  #expect(supervisor.isClosed)
+
+  let drained = consumer.take()
+  #expect(drained == nil)
+  #expect(supervisor.isSealed)
+}
+
 @Test func blockedTakeWakesOnEnqueue() async {
-  let ends = Queue<String>().split()
-  let consumer = ends.consumer.share()
+  let ends = Queue<String>().split(.spmc)
+  let consumer = ends.consumer
 
   // The blocking take gets its own thread: a blocked cooperative thread can
   // starve the pool that this test needs to make progress.
@@ -40,8 +94,8 @@ import Testing
     taken.signal()
   }
   taker.start()
-  // the queue is empty and open, so the taker can only still be blocked
-  try? await Task.sleep(for: .milliseconds(50))
+  // the queue is empty and open, so the taker registers as a consumer waiter
+  waitForWaiters(ends.supervisor, consumers: 1)
 
   let accepted = ends.producer.enqueue("hello")
   #expect(accepted)
@@ -52,7 +106,7 @@ import Testing
 }
 
 @Test func supervisorCloseDrainsThenSeals() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   ends.producer.enqueue(1)
   ends.producer.enqueue(2)
 
@@ -77,7 +131,7 @@ import Testing
 }
 
 @Test func closeOnEmptySealsOnFirstTake() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   ends.supervisor.close()
   let drained = ends.consumer.take()
   #expect(drained == nil)
@@ -88,7 +142,7 @@ import Testing
 }
 
 @Test func enqueueFailsAfterSeal() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   ends.producer.enqueue(1)
   ends.supervisor.close()
   let first = ends.consumer.take()
@@ -106,7 +160,7 @@ import Testing
 }
 
 @Test func producerFinishClosesProduction() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   ends.producer.enqueue(7)
 
   ends.producer.finish()
@@ -120,7 +174,7 @@ import Testing
 }
 
 @Test func producerReleaseClosesProduction() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   release(ends.producer)
 
   // last producer end gone: closed and empty, the take seals
@@ -131,7 +185,7 @@ import Testing
 }
 
 @Test func consumerReleaseFailsEnqueue() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   release(ends.consumer)
 
   #expect(ends.supervisor.isSealed)
@@ -141,7 +195,7 @@ import Testing
 }
 
 @Test func supervisorDrainAllTakesEverythingInOrder() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   ends.producer.enqueue(1)
   ends.producer.enqueue(2)
   ends.producer.enqueue(3)
@@ -161,13 +215,13 @@ import Testing
 }
 
 @Test func waitUntilSealedReturnsAfterConsumerDrains() async {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spmc)
   ends.producer.enqueue(7)
   ends.supervisor.close()
 
   // waitUntilSealed blocks; run it off the cooperative pool.
   let supervisor = ends.supervisor
-  let consumer = ends.consumer.share()
+  let consumer = ends.consumer
   let sealed = DispatchSemaphore(value: 0)
   let waiter = Thread {
     supervisor.waitUntilSealed()
@@ -196,9 +250,9 @@ import Testing
 }
 
 @Test func concurrentSharedEndsDeliverExactlyOnce() async {
-  let ends = Queue<Int>().split()
-  let producer = ends.producer.share()
-  let consumer = ends.consumer.share()
+  let ends = Queue<Int>().split(.mpmc)
+  let producer = ends.producer
+  let consumer = ends.consumer
   let supervisor = ends.supervisor
 
   let producerCount = 4
@@ -245,26 +299,28 @@ import Testing
 }
 
 @Test func sharedConsumerReleaseSeals() {
-  let ends = Queue<Int>().split()
-  var consumer: SharedQueueConsumer<Int>? = ends.consumer.share()
-  #expect(consumer != nil)
-  #expect(ends.supervisor.isSealed == false)
+  let ends = Queue<Int>().split(.mpmc)
+  let producer = ends.producer
+  let supervisor = ends.supervisor
+  #expect(supervisor.isSealed == false)
 
-  // dropping the last reference disconnects the shared end: sealed
-  consumer = nil
-  #expect(ends.supervisor.isSealed)
+  // dropping the ends' shared-consumer reference disconnects the consumer
+  // side: sealed
+  release(ends)
+  #expect(supervisor.isSealed)
 
-  let accepted = ends.producer.enqueue(1)
+  // sealed: the element is discarded and reported as failure
+  let accepted = producer.enqueue(1)
   #expect(accepted == false)
-  release(ends.producer)
+  producer.close()
 }
 
 /// Elements need not be `Sendable`: ownership crosses domains through
 /// the queue (created in the sender's domain, consumed in the taker's).
 @Test func nonSendableElementTraversesQueue() async {
-  let ends = Queue<OpaquePayload>().split()
-  let producer = ends.producer.share()
-  let consumer = ends.consumer.share()
+  let ends = Queue<OpaquePayload>().split(.mpmc)
+  let producer = ends.producer
+  let consumer = ends.consumer
 
   await Task.detached {
     producer.enqueue(OpaquePayload(value: 42))
@@ -290,7 +346,7 @@ import Testing
 /// The `~Copyable` axis of the element constraint: a move-only payload
 /// traverses the queue as well.
 @Test func nonCopyableElementTraversesQueue() {
-  let ends = Queue<SingleShot>().split()
+  let ends = Queue<SingleShot>().split(.spsc)
   let accepted = ends.producer.enqueue(SingleShot())
   #expect(accepted)
   ends.producer.finish()
@@ -306,7 +362,7 @@ import Testing
 /// The `sending` handoff must not produce false positives: reusing a
 /// `Sendable` value after enqueue stays legal.
 @Test func sendableElementRemainsUsableAfterEnqueue() {
-  let ends = Queue<Int>().split()
+  let ends = Queue<Int>().split(.spsc)
   let value = 7
   let accepted = ends.producer.enqueue(value)
   #expect(accepted)
