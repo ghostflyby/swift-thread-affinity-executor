@@ -26,23 +26,27 @@ jobs:
     name: ${{ matrix.os }} · ${{ matrix.config }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    # Linux is blocking: the dedicated executor owns a Thread(block:)
-    # instead of subclassing Thread, and ThreadID declares gettid directly.
+    # macOS needs the xcode-27 image: Xcode 26.x ships Swift 6.3 and cannot
+    # load a 6.4 tools-version manifest. Linux is blocking: the dedicated
+    # executor owns a Thread(block:) instead of subclassing Thread, and
+    # ThreadID declares gettid directly.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, config: debug }
-          - { os: macos-latest, config: release }
+          - { os: xcode-27, config: debug }
+          - { os: xcode-27, config: release }
           - { os: ubuntu-24.04, config: debug }
           - { os: ubuntu-24.04, config: release }
     steps:
       - uses: actions/checkout@v4
+      # setup-swift v2's version catalog ends at 6.2.1; v3 resolves releases
+      # through Swiftly and can install 6.4.2.
       - name: Set up Swift
         if: runner.os == 'Linux'
-        uses: swift-actions/setup-swift@v2
+        uses: swift-actions/setup-swift@v3
         with:
-          swift-version: "6.2.1"
+          swift-version: "6.4.2"
       - name: Show toolchain
         run: swift --version
       - name: Build
@@ -50,9 +54,10 @@ jobs:
       - name: Test
         run: swift test -c ${{ matrix.config }}
 
-  # Swift 6 toolchains are not in setup-swift's Windows catalog (v2 stops at
-  # 5.6.3 for Windows), so Windows uses the community action on the VS 2022
-  # image. The dedicated executor is closure-based, so this leg is blocking.
+  # setup-swift does not install Swift 6 on Windows (v2 stops at 5.6.3 and v3
+  # has no Windows support), so Windows uses the community action on the
+  # VS 2022 image. The dedicated executor is closure-based, so this leg is
+  # blocking.
   windows:
     name: windows-2022
     runs-on: windows-2022
@@ -62,8 +67,8 @@ jobs:
       - name: Set up Swift
         uses: compnerd/gha-setup-swift@main
         with:
-          swift-version: swift-6.2-release
-          swift-build: 6.2-RELEASE
+          swift-version: swift-6.4.2-release
+          swift-build: 6.4.2-RELEASE
       - name: Show toolchain
         run: swift --version
       - name: Build
@@ -77,7 +82,7 @@ jobs:
   tsan:
     name: ThreadSanitizer (on demand)
     if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 20
     continue-on-error: true
     steps:
@@ -89,7 +94,8 @@ jobs:
 
   apple-platforms:
     name: ${{ matrix.destination }}
-    runs-on: macos-latest
+    # Xcode 27 is the first Xcode with the Swift 6.4 toolchain.
+    runs-on: xcode-27
     timeout-minutes: 30
     strategy:
       fail-fast: false
