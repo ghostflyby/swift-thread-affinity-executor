@@ -33,7 +33,7 @@ public protocol ThreadBoundExecutor: SerialExecutor, TaskExecutor {
 }
 
 extension ThreadBoundExecutor {
-  /// Dynamic isolation check consumed by the Swift 6.2+ runtime after
+  /// Dynamic isolation check consumed by the Swift 6.4+ runtime after
   /// regular executor-identity comparison fails.
   ///
   /// A synchronous caller running on the bound thread is isolated with
@@ -41,7 +41,7 @@ extension ThreadBoundExecutor {
   /// calling thread, it also holds when a *different* `ThreadBoundExecutor`
   /// object is bound to the same OS thread.
   ///
-  /// The package requires Swift 6.2, so the requirement is available on
+  /// The package requires Swift 6.4, so the requirement is available on
   /// every supported platform.
   public func isIsolatingCurrentContext() -> Bool? {
     threadID == ThreadID.current
