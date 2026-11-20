@@ -6,8 +6,8 @@ Thread-affinity executors for Swift Concurrency: every job accepted by one of th
 
 | Type | Notes | Status |
 | --- | --- | --- |
-| `BlockingQueue` (separate library product) | Split-endpoint blocking FIFO queues (`Queue` unbounded / `BoundedQueue` fixed capacity); endpoint shape fixed at split time — `split(.spsc)` / `.mpsc` / `.spmc` / `.mpmc`; elements cross by ownership transfer (`sending`) | ✅ |
-| `LockFreeMPSCQueue` (in `BlockingQueue`) | Lock-free unbounded MPSC (`split(.mpsc)`); one node per element, atomic enqueue/`tryTake`, condition-parked blocking `take`; exclusive consumer, no `drainAll` | ✅ |
+| `BlockingQueue` (separate library product) | Split-endpoint blocking FIFO queues (`UnboundedQueue` auto-growing / `BoundedQueue` fixed capacity); endpoint shape fixed at split time — `split(.spsc)` / `.mpsc` / `.spmc` / `.mpmc`; elements cross by ownership transfer (`sending`) | ✅ |
+| `LinkedQueue` (in `BlockingQueue`) | Unbounded linked MPSC queue; enqueue/`tryTake` lock-free, blocking `take` condition-parked (`split(.mpsc)`, or the move-only `.spsc` view); one node per element; exclusive consumer, no `drainAll` | ✅ |
 | `ThreadID` | Cross-platform OS thread ID value type | ✅ |
 | `ThreadBoundExecutor` | `SerialExecutor + TaskExecutor` protocol bound to one OS thread | ✅ |
 | `DedicatedThreadExecutor` | Dedicated `Foundation.Thread` with optional on-thread `initialize`/`finalize` | ✅ |
@@ -73,11 +73,11 @@ let mainExecutor = try await AttachedThreadExecutor.attach(to: MainQueueDispatch
 let executor = try await AttachedThreadExecutor.attach(to: myEventLoopDispatcher)
 ```
 
-### Queue endpoint shapes
+### Endpoint shapes
 
-`BlockingQueue` fixes the endpoint shape when the construction token is
-split. Exclusive ends have no `share()` upgrade, so the shape is a static
-guarantee:
+`UnboundedQueue` and `BoundedQueue` fix the endpoint shape when the
+construction token is split. Exclusive ends have no `share()` upgrade, so the
+chosen shape is a static guarantee:
 
 | Shape | Split call | Producer | Consumer |
 | --- | --- | --- | --- |
@@ -86,10 +86,17 @@ guarantee:
 | SPMC | `split(.spmc)` | `QueueProducer` / `BoundedQueueProducer` | `SharedQueueConsumer` |
 | MPMC | `split(.mpmc)` | `SharedQueueProducer` / `SharedBoundedQueueProducer` | `SharedQueueConsumer` |
 
+`LinkedQueue` has its own endpoints: `split(.mpsc)` returns the
+cloneable `LockFreeMPSCQueueProducer` and the exclusive
+`LockFreeMPSCQueueConsumer`; `split(.spsc)` returns
+`LockFreeMPSCQueueExclusiveProducer`, a move-only view that holds the shared
+producer reference without exposing it, together with the same consumer and
+supervisor.
+
 ```swift
 import BlockingQueue
 
-let ends = Queue<Int>().split(.spsc)
+let ends = UnboundedQueue<Int>().split(.spsc)
 ends.producer.enqueue(1)
 ends.producer.finish()
 
@@ -103,20 +110,23 @@ producer.enqueue(2)
 producer.close()
 ```
 
-Migrating from the previous split API:
+Migrating from the previous API:
 
+- `Queue` → `UnboundedQueue`; `LockFreeMPSCQueue` → `LinkedQueue`.
+  `BoundedQueue` is unchanged. The old token names are removed.
 - `queue.split()` → `queue.split(.spsc)`.
-- `QueueEnds` / `BoundedQueueEnds` → `SPSCQueueEnds` /
-  `BoundedSPSCQueueEnds`.
+- The previous split-result types `QueueEnds` / `BoundedQueueEnds` are now
+  the generic `QueueEnds` bundle; for the `.spsc` shape use
+  `SPSCQueueEnds` / `BoundedSPSCQueueEnds`.
 - `split()` followed by `producer.share()` → construct with `split(.mpsc)`;
   use `split(.mpmc)` when the consumer side is shared as well.
 - `split()` followed by `consumer.share()` → `split(.spmc)` /
   `split(.mpmc)`.
 - `finish()` and `close()` are unchanged.
 
-### Lock-free MPSC
+### Linked queue
 
-`LockFreeMPSCQueue` is an unbounded multi-producer / single-consumer queue
+`LinkedQueue` is an unbounded multi-producer / single-consumer queue
 backed by an intrusive singly-linked list rather than a lock. Producers
 publish nodes through an atomic tail exchange; the one consumer end advances
 a stub head, moves the element out and frees the node. Elements cross the
@@ -126,7 +136,7 @@ queue, so they need not be `Sendable`.
 ```swift
 import BlockingQueue
 
-let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+let ends = LinkedQueue<Int>().split(.mpsc)
 let producer = ends.producer
 let consumer = ends.consumer
 
@@ -151,11 +161,83 @@ racing with `enqueue` is linearized: an element accepted by `enqueue` is
 delivered while a consumer remains, and the queue does not seal around an
 in-flight producer; releasing the consumer end waits for in-flight producers
 before `isSealed` becomes true (an enqueue accepted before the release whose
-link lands after it is stranded, since no taker remains). `split` returns a `sending` bundle: the
-producer and supervisor are `Sendable` and can be shared, while the consumer is
-non-`Sendable` and must stay in the domain it was handed to. The cell
-additionally traps on concurrent consumer entry. The supervisor exposes no
-`drainAll`; drain through the consumer.
+link lands after it is stranded, since no taker remains). `split(.mpsc)`
+returns a `sending` bundle: the producer and supervisor are `Sendable` and can
+be shared, while the consumer is non-`Sendable` and must stay in the domain it
+was handed to. `split(.spsc)` returns the same consumer and supervisor with a
+move-only `LockFreeMPSCQueueExclusiveProducer`, so the single-producer shape
+does not expose the shared class reference. The cell additionally traps on
+concurrent consumer entry. The supervisor exposes no `drainAll`; drain through
+the consumer.
+
+### Capability protocols
+
+The lock-based and lock-free queues expose their capabilities through one
+protocol set, so generic code can accept either implementation:
+
+| Protocol | Requirement |
+| --- | --- |
+| `QueueProducerProtocol<Element>` | non-blocking `enqueue` |
+| `BlockingQueueProducerProtocol<Element>` | `enqueueBlocking` (bounded producers only) |
+| `QueueConsumerProtocol<Element>` | blocking `take` |
+| `TryQueueConsumerProtocol<Element>` | non-blocking `tryTake` (lock-free consumer only) |
+| `QueueLifecycleProtocol` | `close` / `isClosed` / `isSealed` / `waitUntilSealed` |
+| `QueueInspectionProtocol<Element>` | `count` |
+| `QueueDrainProtocol<Element>` | `drainAll` (lock-based supervisor only) |
+| `SingleProducerProtocol<Element>` | producer end usable as the only producer |
+| `MultiProducerProtocol<Element>` | shareable producer end; refines `SingleProducerProtocol` |
+| `SingleConsumerProtocol<Element>` | consumer end usable as the only consumer |
+| `MultiConsumerProtocol<Element>` | shareable consumer end; refines `SingleConsumerProtocol` |
+| `SPSCQueueProtocol<Element>` | `split(.spsc)`; base category |
+| `MPSCQueueProtocol<Element>` | refines SPSC; `split(.mpsc)` |
+| `SPMCQueueProtocol<Element>` | refines SPSC; `split(.spmc)` |
+| `MPMCQueueProtocol<Element>` | refines MPSC and SPMC; `split(.mpmc)` |
+
+The category protocols form a lattice:
+
+```
+            MPMC
+           /    \
+        MPSC    SPMC
+           \    /
+            SPSC
+```
+
+`UnboundedQueue` and `BoundedQueue` declare only `MPMCQueueProtocol`;
+`LinkedQueue` declares `MPSCQueueProtocol`, so it is also usable
+wherever `SPSCQueueProtocol` is required. Its `split(.spsc)` returns the
+move-only `LockFreeMPSCQueueExclusiveProducer` wrapper over the shared
+reference, so SPSC generic code cannot clone it and the shared class is not
+exposed. A generic function can require a category and call that `split`
+directly:
+
+```swift
+func drive<Q: MPSCQueueProtocol & ~Copyable>(_ queue: consuming Q)
+where Q.Element == Int {
+  let ends = queue.split(.mpsc)
+  ends.producer.enqueue(1)
+  ends.consumer.take()
+}
+```
+
+The endpoint refinement (`Multi…: Single…`) makes shared endpoint types
+eligible for the inherited single-sided constraints; the lock-free token
+additionally wraps its shared producer for the concrete `.spsc` shape. The
+category protocols use prefixed associated types (`SPSCProducer`,
+`MPSCProducer`, …) because one token implements several categories; their
+conformances are declared inside the token type declarations so move-only
+element types are supported. `UnboundedQueue` is a multi-shape construction token, so
+a category constraint describes what it can be split into, not an exclusive
+identity.
+
+`QueueEnds<P, C, S>` composes a producer, consumer and supervisor with one
+shared element type. Its initializer is public, so another queue family can
+build the bundle and conform to the category protocols. The existing ends
+names — `SPSCQueueEnds`, `BoundedMPSCQueueEnds`, `LockFreeMPSCQueueEnds`,
+`LockFreeSPSCQueueEnds`, … — are aliases of that generic bundle. The lock-free
+consumer is non-`Sendable`, so both lock-free ends bundles are non-`Sendable`;
+the `.mpsc` producer and supervisor remain `Sendable`, and the `.spsc`
+producer is the move-only exclusive wrapper.
 
 ## Build / test
 
@@ -172,7 +254,7 @@ Requires a Swift 6.4+ toolchain. Deployment floors: macOS 15 / iOS 18 / tvOS 18 
 - An executor attached to the main thread via `MainQueueDispatcher` shares the thread with `MainActor` but is not the same executor identity and does not replace it.
 - `MigratingThreadExecutor.migrate(to:)` and `handOver(to:)` require a successor pump whose fixed thread or queue is independent of the currently serving pump — a different wrapper around the same thread or queue still deadlocks. The handshake post queues behind the old serving loop, which exits only after retarget seals its queue, and retarget waits for the handshake. The handshake itself no longer blocks the successor's thread while the old generation drains; the serving loop is posted after the old finalize.
 - `FixedThreadDispatcher.post` returns `false` once the pump stops accepting work. Attachment and migration handshakes surface that as `AttachError.pumpUnavailable` / `MigrationError.pumpUnavailable`; `detach()` returns `false` when the finalize post is rejected instead of blocking forever. A pump that accepts a post but never runs it still leaves the join pending.
-- `LockFreeMPSCQueue` allocates a node plus its element storage per enqueued element and keeps them until the consumer takes it (or the queue is released). A blocking `take()` parks on an `NSCondition`; producers take that lock only when a consumer is parked, so enqueue is lock-free in the common case but a parked consumer adds a mutex-based wake path. Its supervisor has no `drainAll`: the consumer end is exclusive and non-`Sendable`, and a second taker would break the single-consumer head advance. The consumer cell traps on concurrent `take()`/`tryTake()` entry, so a shared holder cannot silently double-free the head.
+- `LinkedQueue` allocates a node plus its element storage per enqueued element and keeps them until the consumer takes it (or the queue is released). A blocking `take()` parks on an `NSCondition`; producers take that lock only when a consumer is parked, so enqueue is lock-free in the common case but a parked consumer adds a mutex-based wake path. Its supervisor has no `drainAll`: the consumer end is exclusive and non-`Sendable`, and a second taker would break the single-consumer head advance. The consumer cell traps on concurrent `take()`/`tryTake()` entry, so a shared holder cannot silently double-free the head.
 
 ## License
 

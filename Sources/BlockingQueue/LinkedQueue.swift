@@ -1,17 +1,19 @@
 //
-//  LockFreeMPSCQueue.swift
+//  LinkedQueue.swift
 //  BlockingQueue
 //
-//  Lock-free unbounded multi-producer / single-consumer queue: one exclusive
+//  Unbounded linked multi-producer / single-consumer queue: one exclusive
 //  consumer end, one cloneable producer end and a control handle.
 //
 
-/// Linear construction token for a lock-free unbounded MPSC queue.
+/// Linear construction token for an unbounded linked queue.
 ///
 /// `split(.mpsc)` consumes the token and hands out one cloneable producer
-/// end, one exclusive consumer end and a supervisor. Unlike `Queue`, this
-/// implementation is not backed by a lock: producers publish nodes through an
-/// atomic tail exchange, and the single consumer advances a stub head.
+/// end, one exclusive consumer end and a supervisor; `split(.spsc)` hands out
+/// a move-only wrapper over the same producer reference instead. Unlike
+/// `UnboundedQueue`, this implementation is not backed by a lock: producers
+/// publish nodes through an atomic tail exchange, and the single consumer
+/// advances a stub head.
 ///
 /// Elements need not be `Sendable`: ownership transfers through the queue —
 /// `consuming sending` in on enqueue, `sending` out on take. The handoff is
@@ -25,14 +27,40 @@
 /// the queue seals, and an enqueue accepted just before that release whose
 /// link lands after it is stranded without a taker.
 ///
-/// `split(_:)` returns a `sending` bundle: the shared producer and supervisor
-/// can cross domains, while the exclusive consumer is non-`Sendable` and stays
-/// in the domain it was handed to.
-public struct LockFreeMPSCQueue<Element: ~Copyable>: ~Copyable, Sendable {
+/// Both splits return a `sending` bundle: the `.mpsc` producer and the
+/// supervisor can cross domains, while the exclusive consumer is
+/// non-`Sendable` and stays in the domain it was handed to.
+public struct LinkedQueue<Element: ~Copyable>: ~Copyable, Sendable,
+  MPSCQueueProtocol
+{
+  public typealias Element = Element
+
+  public typealias SPSCProducer = LockFreeMPSCQueueExclusiveProducer<Element>
+  public typealias SPSCConsumer = LockFreeMPSCQueueConsumer<Element>
+  public typealias SPSCSupervisor = LockFreeMPSCQueueSupervisor<Element>
+
+  public typealias MPSCProducer = LockFreeMPSCQueueProducer<Element>
+  public typealias MPSCConsumer = LockFreeMPSCQueueConsumer<Element>
+  public typealias MPSCSupervisor = LockFreeMPSCQueueSupervisor<Element>
+
   let cell: LockFreeMPSCQueueCell<Element>
 
   public init() {
     cell = LockFreeMPSCQueueCell()
+  }
+
+  /// Splits the queue into the exclusive single-producer view. The producer
+  /// end is a move-only wrapper over the shared producer reference; MPSC
+  /// refines SPSC. Consumes the token.
+  public consuming func split(_ option: SPSCOption) -> sending LockFreeSPSCQueueEnds<Element> {
+    cell.registerEnds()
+    return LockFreeSPSCQueueEnds<Element>(
+      producer: LockFreeMPSCQueueExclusiveProducer(
+        LockFreeMPSCQueueProducer(cell: cell)
+      ),
+      consumer: LockFreeMPSCQueueConsumer(cell: cell),
+      supervisor: LockFreeMPSCQueueSupervisor(cell: cell)
+    )
   }
 
   /// Splits the queue into a cloneable producer end, one exclusive consumer
@@ -49,22 +77,49 @@ public struct LockFreeMPSCQueue<Element: ~Copyable>: ~Copyable, Sendable {
   }
 }
 
-/// The capabilities handed out by `LockFreeMPSCQueue.split(.mpsc)`:
+/// The capabilities handed out by `LinkedQueue.split(.mpsc)`:
 /// move-only and non-`Sendable` because of the exclusive consumer end.
-@frozen
-public struct LockFreeMPSCQueueEnds<Element: ~Copyable>: ~Copyable {
-  public let producer: LockFreeMPSCQueueProducer<Element>
-  public let consumer: LockFreeMPSCQueueConsumer<Element>
-  public let supervisor: LockFreeMPSCQueueSupervisor<Element>
+public typealias LockFreeMPSCQueueEnds<Element: ~Copyable> = QueueEnds<
+  LockFreeMPSCQueueProducer<Element>,
+  LockFreeMPSCQueueConsumer<Element>,
+  LockFreeMPSCQueueSupervisor<Element>
+>
 
-  init(
-    producer: LockFreeMPSCQueueProducer<Element>,
-    consumer: consuming LockFreeMPSCQueueConsumer<Element>,
-    supervisor: LockFreeMPSCQueueSupervisor<Element>
-  ) {
+/// The capabilities handed out by `LinkedQueue.split(.spsc)`: a
+/// move-only exclusive producer view over the shared reference, the exclusive
+/// consumer and the supervisor.
+public typealias LockFreeSPSCQueueEnds<Element: ~Copyable> = QueueEnds<
+  LockFreeMPSCQueueExclusiveProducer<Element>,
+  LockFreeMPSCQueueConsumer<Element>,
+  LockFreeMPSCQueueSupervisor<Element>
+>
+
+/// Move-only producer view minted by `split(.spsc)`.
+///
+/// The lock-free queue's native producer end is a cloneable class reference.
+/// This wrapper holds that reference without exposing it, so an SPSC split
+/// yields a genuinely noncopyable producer end while the queue still supports
+/// multiple producers in its MPSC shape.
+public struct LockFreeMPSCQueueExclusiveProducer<Element: ~Copyable>: ~Copyable,
+  Sendable, QueueProducerProtocol, SingleProducerProtocol
+{
+  public typealias Element = Element
+
+  private let producer: LockFreeMPSCQueueProducer<Element>
+
+  init(_ producer: consuming LockFreeMPSCQueueProducer<Element>) {
     self.producer = producer
-    self.consumer = consumer
-    self.supervisor = supervisor
+  }
+
+  /// Appends `element` to the back without waiting.
+  @discardableResult
+  public func enqueue(_ element: consuming sending Element) -> Bool {
+    producer.enqueue(element)
+  }
+
+  /// Closes production. Remaining elements stay available to consumers.
+  public func close() {
+    producer.close()
   }
 }
 
@@ -73,7 +128,11 @@ public struct LockFreeMPSCQueueEnds<Element: ~Copyable>: ~Copyable {
 ///
 /// Production closes through `close()` or once the last producer reference
 /// is released.
-public final class LockFreeMPSCQueueProducer<Element: ~Copyable>: Sendable {
+public final class LockFreeMPSCQueueProducer<Element: ~Copyable>: Sendable,
+  QueueProducerProtocol, MultiProducerProtocol
+{
+  public typealias Element = Element
+
   private let cell: LockFreeMPSCQueueCell<Element>
 
   init(cell: LockFreeMPSCQueueCell<Element>) {
@@ -113,7 +172,11 @@ public final class LockFreeMPSCQueueProducer<Element: ~Copyable>: Sendable {
 /// element is available or the queue is closed and drained. The data path
 /// itself does not take that lock; producers touch it only when a consumer
 /// is parked.
-public struct LockFreeMPSCQueueConsumer<Element: ~Copyable>: ~Copyable {
+public struct LockFreeMPSCQueueConsumer<Element: ~Copyable>: ~Copyable,
+  QueueConsumerProtocol, TryQueueConsumerProtocol, SingleConsumerProtocol
+{
+  public typealias Element = Element
+
   let cell: LockFreeMPSCQueueCell<Element>
 
   init(cell: LockFreeMPSCQueueCell<Element>) {
@@ -155,7 +218,11 @@ public struct LockFreeMPSCQueueConsumer<Element: ~Copyable>: ~Copyable {
 /// There is deliberately no `drainAll`: the consumer end is exclusive, so a
 /// drain from the control handle would introduce a second taker and break
 /// the single-consumer algorithm. Drain through the consumer instead.
-public final class LockFreeMPSCQueueSupervisor<Element: ~Copyable>: Sendable {
+public final class LockFreeMPSCQueueSupervisor<Element: ~Copyable>: Sendable,
+  QueueLifecycleProtocol, QueueInspectionProtocol
+{
+  public typealias Element = Element
+
   let cell: LockFreeMPSCQueueCell<Element>
 
   init(cell: LockFreeMPSCQueueCell<Element>) {

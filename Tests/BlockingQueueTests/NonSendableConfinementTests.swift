@@ -24,7 +24,7 @@ private actor NonSendableConsumerRunner {
 }
 
 @Test func nonSendableConsumerServesMultipleTasksThroughActor() async {
-  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let ends = LinkedQueue<Int>().split(.mpsc)
   let producer = ends.producer
   let consumer = ends.consumer
   let supervisor = ends.supervisor

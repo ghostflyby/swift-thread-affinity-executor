@@ -59,7 +59,7 @@ private struct LockFreeMPSCQueueNode<Element: ~Copyable>: ~Copyable {
   }
 }
 
-/// Shared state behind a `LockFreeMPSCQueue` split.
+/// Shared state behind a `LinkedQueue` split.
 ///
 /// Lock-free path: producers exchange `tail` and link the previous tail with a
 /// releasing store; the consumer acquires `head.next`. `head` is advanced only

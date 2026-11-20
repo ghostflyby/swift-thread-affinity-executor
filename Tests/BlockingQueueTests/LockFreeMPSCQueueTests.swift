@@ -27,7 +27,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 }
 
 @Test func lockFreeFifoWithExclusiveConsumer() {
-  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let ends = LinkedQueue<Int>().split(.mpsc)
   let producer = ends.producer
   let consumer = ends.consumer
   let supervisor = ends.supervisor
@@ -74,7 +74,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 }
 
 @Test func lockFreeConsumerReleaseFailsEnqueueAndSeals() {
-  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let ends = LinkedQueue<Int>().split(.mpsc)
   let producer = ends.producer
   let supervisor = ends.supervisor
   release(ends.consumer)
@@ -85,7 +85,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 }
 
 @Test func lockFreeSupervisorCloseDrainsThenSeals() {
-  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let ends = LinkedQueue<Int>().split(.mpsc)
   let producer = ends.producer
   let consumer = ends.consumer
   let supervisor = ends.supervisor
@@ -110,7 +110,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 /// Draining a closed queue with the non-blocking dequeue must reach the same
 /// terminal state as a blocking take, or `waitUntilSealed()` would hang.
 @Test func lockFreeTryTakeSealsClosedDrainedQueue() {
-  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let ends = LinkedQueue<Int>().split(.mpsc)
   let producer = ends.producer
   let consumer = ends.consumer
   let supervisor = ends.supervisor
@@ -136,7 +136,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 /// A non-blocking drain must continue until the supervisor is sealed; an empty
 /// `tryTake()` while a producer is in flight is not terminal.
 @Test func lockFreeNonBlockingDrainContinuesUntilSealed() {
-  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let ends = LinkedQueue<Int>().split(.mpsc)
   let producer = ends.producer
   let consumer = ends.consumer
   let supervisor = ends.supervisor
@@ -201,7 +201,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 /// visible; otherwise a concurrent take can decrement first and expose a
 /// negative element count.
 @Test func lockFreeCountNeverGoesNegativeUnderConcurrency() {
-  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let ends = LinkedQueue<Int>().split(.mpsc)
   let producer = ends.producer
   let consumer = ends.consumer
   let supervisor = ends.supervisor
@@ -269,7 +269,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 }
 
 @Test func lockFreeBlockedTakeWakesOnEnqueue() {
-  let ends = LockFreeMPSCQueue<String>().split(.mpsc)
+  let ends = LinkedQueue<String>().split(.mpsc)
   let producer = ends.producer
   let consumer = ends.consumer
   let supervisor = ends.supervisor
@@ -293,7 +293,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 }
 
 @Test func lockFreeCloseWakesBlockedTake() {
-  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let ends = LinkedQueue<Int>().split(.mpsc)
   let consumer = ends.consumer
   let supervisor = ends.supervisor
 
@@ -312,7 +312,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 }
 
 @Test func lockFreeConcurrentProducersDeliverExactlyOnce() {
-  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let ends = LinkedQueue<Int>().split(.mpsc)
   let producer = ends.producer
   let consumer = ends.consumer
   let supervisor = ends.supervisor
@@ -356,7 +356,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 /// races with the producers: the queue may not seal around an accepted
 /// element.
 @Test func lockFreeConcurrentCloseDoesNotLoseAcceptedElements() {
-  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let ends = LinkedQueue<Int>().split(.mpsc)
   let producer = ends.producer
   let consumer = ends.consumer
   let supervisor = ends.supervisor
@@ -393,7 +393,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 }
 
 @Test func lockFreeWaitUntilSealedReturnsAfterConsumerDrains() {
-  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let ends = LinkedQueue<Int>().split(.mpsc)
   let producer = ends.producer
   let consumer = ends.consumer
   let supervisor = ends.supervisor
@@ -418,7 +418,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 /// Elements need not be `Sendable`: ownership crosses domains through the
 /// queue (created in the producer's domain, consumed in the taker's).
 @Test func lockFreeNonSendableElementTraversesQueue() async {
-  let ends = LockFreeMPSCQueue<OpaquePayload>().split(.mpsc)
+  let ends = LinkedQueue<OpaquePayload>().split(.mpsc)
   let producer = ends.producer
   let consumer = ends.consumer
 
@@ -436,7 +436,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 /// The `~Copyable` axis of the element constraint: a move-only payload
 /// traverses the queue as well.
 @Test func lockFreeNonCopyableElementTraversesQueue() {
-  let ends = LockFreeMPSCQueue<SingleShot>().split(.mpsc)
+  let ends = LinkedQueue<SingleShot>().split(.mpsc)
   let producer = ends.producer
   let consumer = ends.consumer
 
@@ -467,7 +467,7 @@ private struct TrackedValue: ~Copyable {
 /// still own.
 @Test func lockFreeReleasingUndrainedQueueDestroysElements() {
   let probe = DeinitProbe()
-  let ends = LockFreeMPSCQueue<TrackedValue>().split(.mpsc)
+  let ends = LinkedQueue<TrackedValue>().split(.mpsc)
   let first = ends.producer.enqueue(TrackedValue(probe: probe))
   #expect(first)
   let second = ends.producer.enqueue(TrackedValue(probe: probe))
@@ -480,7 +480,7 @@ private struct TrackedValue: ~Copyable {
 /// Releasing the consumer end must not seal while a producer that read
 /// `closed == false` is still between its check and its link.
 @Test func lockFreeConsumerReleaseWaitsForInFlightProducer() {
-  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let ends = LinkedQueue<Int>().split(.mpsc)
   let producer = ends.producer
   let consumer = ends.consumer
   let supervisor = ends.supervisor

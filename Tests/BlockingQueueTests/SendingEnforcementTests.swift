@@ -250,6 +250,62 @@ private enum CompileCheckError: Error {
     try expectSendingResults(products: products, swiftc: swiftc)
   }
 
+  /// The SPSC producer associated type is noncopyable: generic SPSC code must
+  /// not be able to consume the producer field twice. The control snippet
+  /// keeps the violation check from passing because of an unrelated error.
+  @Test
+  func spscProducerCannotBeDuplicated() throws {
+    let swiftc: String
+    let products: String
+    do {
+      swiftc = try swiftcPath()
+      products = try productsDirectory()
+    } catch {
+      Issue.record("compile-check harness unavailable: \(error)")
+      return
+    }
+
+    let control = """
+      import BlockingQueue
+
+      func single<Q: SPSCQueueProtocol & ~Copyable>(_ queue: consuming Q)
+      where Q.Element == Int {
+        let ends = queue.split(.spsc)
+        let producer = consume ends.producer
+        _ = producer.enqueue(1)
+      }
+      """
+
+    let violation = """
+      import BlockingQueue
+
+      func duplicate<Q: SPSCQueueProtocol & ~Copyable>(_ queue: consuming Q)
+      where Q.Element == Int {
+        let ends = queue.split(.spsc)
+        let first = consume ends.producer
+        let second = consume ends.producer
+        _ = consume first
+        _ = consume second
+      }
+      """
+
+    let controlResult = try compile(control, products: products, swiftc: swiftc)
+    #expect(
+      controlResult.status == 0,
+      "the single-consume SPSC control must compile — got:\n\(controlResult.diagnostics)"
+    )
+
+    let violationResult = try compile(violation, products: products, swiftc: swiftc)
+    #expect(
+      violationResult.status != 0,
+      "generic SPSC code must not be able to duplicate the producer end"
+    )
+    #expect(
+      violationResult.diagnostics.contains("consumed more than once"),
+      "expected the noncopyable-consumption diagnostic — got:\n\(violationResult.diagnostics)"
+    )
+  }
+
   /// The exclusive consumer is non-`Sendable`; a `Sendable` holder cannot
   /// store it, so safe code cannot share it across isolation domains.
   @Test
