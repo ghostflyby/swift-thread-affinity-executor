@@ -150,8 +150,8 @@ only when a consumer is parked — the data path stays lock-free. `close()`
 racing with `enqueue` is linearized: an element accepted by `enqueue` is
 delivered while a consumer remains, and the queue does not seal around an
 in-flight producer; releasing the consumer end waits for in-flight producers
-before `isSealed` becomes true (an element accepted after the release is
-stranded, since no taker remains). `split` returns a `sending` bundle: the
+before `isSealed` becomes true (an enqueue accepted before the release whose
+link lands after it is stranded, since no taker remains). `split` returns a `sending` bundle: the
 producer and supervisor are `Sendable` and can be shared, while the consumer is
 non-`Sendable` and must stay in the domain it was handed to. The cell
 additionally traps on concurrent consumer entry. The supervisor exposes no

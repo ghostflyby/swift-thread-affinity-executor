@@ -49,6 +49,11 @@ jobs:
           swift-version: "6.4.2"
       - name: Show toolchain
         run: swift --version
+      # TSan was previously quarantined because the hosted macOS test process
+      # stalled with no output. The stall was diagnosed in #1: blocking queue
+      # waits occupied every cooperative-pool thread on the 3-vCPU runner, so
+      # the producer task that would unblock them never ran. Those waits now
+      # run on dedicated threads; TSan is back in the main debug matrix.
       - name: Build (ThreadSanitizer)
         if: matrix.config == 'debug'
         env:

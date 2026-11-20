@@ -153,6 +153,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
     producerDone.signal()
   }
 
+  let deadline = Date().addingTimeInterval(10)
   var received = 0
   while true {
     if consumer.tryTake() != nil {
@@ -162,10 +163,15 @@ private func waitForParkedConsumer<Element: ~Copyable>(
     if supervisor.isSealed {
       break
     }
+    if Date() >= deadline {
+      Issue.record("non-blocking drain did not seal within 10 seconds")
+      break
+    }
     Thread.sleep(forTimeInterval: 0.0001)
   }
 
-  producerDone.wait()
+  let producerFinished = producerDone.wait(timeout: .now() + 10) == .success
+  #expect(producerFinished)
   #expect(received == accepted.load(ordering: .relaxed))
   #expect(supervisor.isSealed)
   release(consumer)
@@ -197,6 +203,7 @@ private func waitForParkedConsumer<Element: ~Copyable>(
     done.store(true, ordering: .releasing)
   }
 
+  let deadline = Date().addingTimeInterval(10)
   var received = 0
   var sawNegative = false
   while true {
@@ -214,6 +221,10 @@ private func waitForParkedConsumer<Element: ~Copyable>(
           sawNegative = true
         }
       }
+      break
+    }
+    if Date() >= deadline {
+      Issue.record("count sampler did not finish within 10 seconds")
       break
     }
     Thread.sleep(forTimeInterval: 0.0001)
@@ -422,4 +433,80 @@ private struct TrackedValue: ~Copyable {
 
   release(ends)
   #expect(probe.count.load(ordering: .relaxed) == 2)
+}
+
+/// Releasing the consumer end must not seal while a producer that read
+/// `closed == false` is still between its check and its link.
+@Test func lockFreeConsumerReleaseWaitsForInFlightProducer() {
+  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let producer = ends.producer
+  let consumer = ends.consumer
+  let supervisor = ends.supervisor
+  let cell = supervisor.cell
+
+  let linkCalls = Atomic<Int>(0)
+  let decrementCalls = Atomic<Int>(0)
+  let p1AtDecrement = DispatchSemaphore(value: 0)
+  let releaseP1 = DispatchSemaphore(value: 0)
+  let p2AtLink = DispatchSemaphore(value: 0)
+  let releaseP2 = DispatchSemaphore(value: 0)
+  let p1Done = DispatchSemaphore(value: 0)
+  let p2Done = DispatchSemaphore(value: 0)
+
+  cell.beforeLinkHook = {
+    if linkCalls.wrappingAdd(1, ordering: .relaxed).newValue == 2 {
+      p2AtLink.signal()
+      releaseP2.wait()
+    }
+  }
+  cell.afterProducerDecrementHook = {
+    if decrementCalls.wrappingAdd(1, ordering: .relaxed).newValue == 1 {
+      p1AtDecrement.signal()
+      releaseP1.wait()
+    }
+  }
+
+  func wait(_ semaphore: DispatchSemaphore, _ label: String) -> Bool {
+    let arrived = semaphore.wait(timeout: .now() + 5) == .success
+    if !arrived {
+      Issue.record("timed out waiting for \(label)")
+    }
+    return arrived
+  }
+
+  let first = Thread {
+    _ = producer.enqueue(1)
+    p1Done.signal()
+  }
+  first.start()
+  guard wait(p1AtDecrement, "P1 after-decrement hook") else {
+    releaseP1.signal()
+    releaseP2.signal()
+    return
+  }
+
+  let second = Thread {
+    _ = producer.enqueue(2)
+    p2Done.signal()
+  }
+  second.start()
+  guard wait(p2AtLink, "P2 before-link hook") else {
+    releaseP1.signal()
+    releaseP2.signal()
+    return
+  }
+
+  // The consumer end is released while P2 is between its closed check and
+  // its link. P1 has already decremented but must not seal around P2.
+  release(consumer)
+  #expect(supervisor.isSealed == false)
+
+  releaseP1.signal()
+  #expect(wait(p1Done, "P1 completion"))
+  #expect(supervisor.isSealed == false)
+
+  releaseP2.signal()
+  #expect(wait(p2Done, "P2 completion"))
+  #expect(supervisor.isSealed)
+  #expect(supervisor.count == 2)
 }

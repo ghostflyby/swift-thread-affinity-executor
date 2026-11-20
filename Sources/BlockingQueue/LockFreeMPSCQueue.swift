@@ -20,8 +20,10 @@
 ///
 /// The queue is unbounded and allocates one node per enqueued element;
 /// consumed nodes are freed by the consumer. `close()`/`enqueue` race safely:
-/// an element accepted by `enqueue` is delivered, and the queue never seals
-/// while a producer is between its close check and its link.
+/// while a consumer end remains, an element accepted by `enqueue` is
+/// delivered; releasing the consumer end waits for in-flight producers before
+/// the queue seals, and an enqueue accepted just before that release whose
+/// link lands after it is stranded without a taker.
 ///
 /// `split(_:)` returns a `sending` bundle: the shared producer and supervisor
 /// can cross domains, while the exclusive consumer is non-`Sendable` and stays

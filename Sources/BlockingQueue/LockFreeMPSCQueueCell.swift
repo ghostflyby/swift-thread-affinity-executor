@@ -92,6 +92,11 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
   private let elementCondition = NSCondition()
   private let sealCondition = NSCondition()
 
+  /// Test-only suspension points. Set them before starting any producer
+  /// thread; the test target does not mutate them concurrently.
+  var beforeLinkHook: (@Sendable () -> Void)?
+  var afterProducerDecrementHook: (@Sendable () -> Void)?
+
   init() {
     let stub = UnsafeMutablePointer<Node>.allocate(capacity: 1)
     stub.initialize(to: Node())
@@ -133,6 +138,8 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
       return false
     }
 
+    beforeLinkHook?()
+
     // Increment before publishing: the consumer's acquire load of the link
     // then orders this increment before its decrement, so `count` cannot go
     // negative. In-flight increments may temporarily over-count.
@@ -148,17 +155,18 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
   }
 
   /// Drops the in-flight producer count. If the consumer end is already gone
-  /// and this was the last in-flight enqueue, no consumer observation can seal
-  /// the queue anymore, so the producer seals it here. This keeps `isSealed`
-  /// from becoming true while a producer is still between its `closed` check
-  /// and its link.
+  /// and no producer remains, no consumer observation can seal the queue, so
+  /// the producer seals it here. Re-read `activeProducers` after the closed
+  /// check: the decrement's own new value is stale, and a producer that
+  /// registered after it but read `closed == false` before the seal must be
+  /// seen. A producer that registers after the fresh load sees `closed` and
+  /// fails, so it cannot strand an accepted element behind the seal.
   private func finishProducer() {
-    let remaining = activeProducers.wrappingSubtract(
-      1, ordering: .sequentiallyConsistent
-    ).newValue
-    if remaining == 0,
-      closed.load(ordering: .sequentiallyConsistent),
-      consumerCount.load(ordering: .sequentiallyConsistent) == 0
+    activeProducers.wrappingSubtract(1, ordering: .sequentiallyConsistent)
+    afterProducerDecrementHook?()
+    if closed.load(ordering: .sequentiallyConsistent),
+      consumerCount.load(ordering: .sequentiallyConsistent) == 0,
+      activeProducers.load(ordering: .sequentiallyConsistent) == 0
     {
       markSealed()
     }
