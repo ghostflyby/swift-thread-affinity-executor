@@ -38,7 +38,7 @@ public final class QueueDispatcher: FixedThreadDispatcher {
   private let finalized = Atomic<Bool>(false)
 
   public init(lifecycle: any ThreadLifecycleDelegate = ClosureLifecycle()) {
-    let ends = Queue<@Sendable () -> Void>().split(.mpsc)
+    let ends = UnboundedQueue<@Sendable () -> Void>().split(.mpsc)
     producer = ends.producer
     consumer = ends.consumer
     supervisor = ends.supervisor

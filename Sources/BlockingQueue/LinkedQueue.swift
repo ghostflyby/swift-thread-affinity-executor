@@ -1,19 +1,19 @@
 //
-//  LockFreeMPSCQueue.swift
+//  LinkedQueue.swift
 //  BlockingQueue
 //
-//  Lock-free unbounded multi-producer / single-consumer queue: one exclusive
+//  Unbounded linked multi-producer / single-consumer queue: one exclusive
 //  consumer end, one cloneable producer end and a control handle.
 //
 
-/// Linear construction token for a lock-free unbounded MPSC queue.
+/// Linear construction token for an unbounded linked queue.
 ///
 /// `split(.mpsc)` consumes the token and hands out one cloneable producer
 /// end, one exclusive consumer end and a supervisor; `split(.spsc)` hands out
 /// a move-only wrapper over the same producer reference instead. Unlike
-/// `Queue`, this implementation is not backed by a lock: producers publish
-/// nodes through an atomic tail exchange, and the single consumer advances a
-/// stub head.
+/// `UnboundedQueue`, this implementation is not backed by a lock: producers
+/// publish nodes through an atomic tail exchange, and the single consumer
+/// advances a stub head.
 ///
 /// Elements need not be `Sendable`: ownership transfers through the queue —
 /// `consuming sending` in on enqueue, `sending` out on take. The handoff is
@@ -30,7 +30,7 @@
 /// Both splits return a `sending` bundle: the `.mpsc` producer and the
 /// supervisor can cross domains, while the exclusive consumer is
 /// non-`Sendable` and stays in the domain it was handed to.
-public struct LockFreeMPSCQueue<Element: ~Copyable>: ~Copyable, Sendable,
+public struct LinkedQueue<Element: ~Copyable>: ~Copyable, Sendable,
   MPSCQueueProtocol
 {
   public typealias Element = Element
@@ -77,7 +77,10 @@ public struct LockFreeMPSCQueue<Element: ~Copyable>: ~Copyable, Sendable,
   }
 }
 
-/// The capabilities handed out by `LockFreeMPSCQueue.split(.mpsc)`:
+@available(*, deprecated, renamed: "LinkedQueue")
+public typealias LockFreeMPSCQueue<Element: ~Copyable> = LinkedQueue<Element>
+
+/// The capabilities handed out by `LinkedQueue.split(.mpsc)`:
 /// move-only and non-`Sendable` because of the exclusive consumer end.
 public typealias LockFreeMPSCQueueEnds<Element: ~Copyable> = QueueEnds<
   LockFreeMPSCQueueProducer<Element>,
@@ -85,7 +88,7 @@ public typealias LockFreeMPSCQueueEnds<Element: ~Copyable> = QueueEnds<
   LockFreeMPSCQueueSupervisor<Element>
 >
 
-/// The capabilities handed out by `LockFreeMPSCQueue.split(.spsc)`: a
+/// The capabilities handed out by `LinkedQueue.split(.spsc)`: a
 /// move-only exclusive producer view over the shared reference, the exclusive
 /// consumer and the supervisor.
 public typealias LockFreeSPSCQueueEnds<Element: ~Copyable> = QueueEnds<

@@ -1,5 +1,5 @@
 //
-//  Queue.swift
+//  UnboundedQueue.swift
 //  BlockingQueue
 //
 //  Unbounded (auto-growing) queue family: a linear construction token that
@@ -18,7 +18,7 @@
 /// `consuming sending` in on enqueue, `sending` out on take. The handoff
 /// is compiler-enforced (the check lives in the SIL sendability pass, so
 /// it surfaces on build rather than in a pure typecheck).
-public struct Queue<Element: ~Copyable>: ~Copyable, Sendable, MPMCQueueProtocol {
+public struct UnboundedQueue<Element: ~Copyable>: ~Copyable, Sendable, MPMCQueueProtocol {
   public typealias Element = Element
 
   public typealias SPSCProducer = QueueProducer<Element>
@@ -88,22 +88,25 @@ public struct Queue<Element: ~Copyable>: ~Copyable, Sendable, MPMCQueueProtocol 
   }
 }
 
-/// The capabilities handed out by `Queue.split(.spsc)`: move-only.
+@available(*, deprecated, renamed: "UnboundedQueue")
+public typealias Queue<Element: ~Copyable> = UnboundedQueue<Element>
+
+/// The capabilities handed out by `UnboundedQueue.split(.spsc)`: move-only.
 public typealias SPSCQueueEnds<Element: ~Copyable> = QueueEnds<
   QueueProducer<Element>, QueueConsumer<Element>, QueueSupervisor<Element>
 >
 
-/// The capabilities handed out by `Queue.split(.mpsc)`: move-only.
+/// The capabilities handed out by `UnboundedQueue.split(.mpsc)`: move-only.
 public typealias MPSCQueueEnds<Element: ~Copyable> = QueueEnds<
   SharedQueueProducer<Element>, QueueConsumer<Element>, QueueSupervisor<Element>
 >
 
-/// The capabilities handed out by `Queue.split(.spmc)`: move-only.
+/// The capabilities handed out by `UnboundedQueue.split(.spmc)`: move-only.
 public typealias SPMCQueueEnds<Element: ~Copyable> = QueueEnds<
   QueueProducer<Element>, SharedQueueConsumer<Element>, QueueSupervisor<Element>
 >
 
-/// The capabilities handed out by `Queue.split(.mpmc)`: move-only.
+/// The capabilities handed out by `UnboundedQueue.split(.mpmc)`: move-only.
 public typealias MPMCQueueEnds<Element: ~Copyable> = QueueEnds<
   SharedQueueProducer<Element>, SharedQueueConsumer<Element>, QueueSupervisor<Element>
 >

@@ -23,13 +23,13 @@ private func roundTrip<
 }
 
 @Test func lockBasedEndpointsShareCapabilityProtocols() {
-  let ends = Queue<Int>().split(.spsc)
+  let ends = UnboundedQueue<Int>().split(.spsc)
   roundTrip(ends.producer, ends.consumer)
   release(ends.consumer)
 }
 
 @Test func lockFreeEndpointsShareCapabilityProtocols() {
-  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let ends = LinkedQueue<Int>().split(.mpsc)
   roundTrip(ends.producer, ends.consumer)
   release(ends.consumer)
 }
@@ -75,10 +75,10 @@ private func roundTripMPMC<Q: MPMCQueueProtocol & ~Copyable>(
 }
 
 @Test func lockBasedTokensConformToEveryCategoryProtocol() {
-  roundTripSPSC(Queue<Int>())
-  roundTripMPSC(Queue<Int>())
-  roundTripSPMC(Queue<Int>())
-  roundTripMPMC(Queue<Int>())
+  roundTripSPSC(UnboundedQueue<Int>())
+  roundTripMPSC(UnboundedQueue<Int>())
+  roundTripSPMC(UnboundedQueue<Int>())
+  roundTripMPMC(UnboundedQueue<Int>())
 
   roundTripSPSC(BoundedQueue<Int>(capacity: 4))
   roundTripMPSC(BoundedQueue<Int>(capacity: 4))
@@ -87,11 +87,11 @@ private func roundTripMPMC<Q: MPMCQueueProtocol & ~Copyable>(
 }
 
 @Test func lockFreeTokenConformsToMPSCProtocol() {
-  roundTripMPSC(LockFreeMPSCQueue<Int>())
+  roundTripMPSC(LinkedQueue<Int>())
 }
 
 @Test func lockFreeTokenCanBeUsedAsSPSC() {
-  roundTripSPSC(LockFreeMPSCQueue<Int>())
+  roundTripSPSC(LinkedQueue<Int>())
 }
 
 private func useMPSCAsSPSC<Q: MPSCQueueProtocol & ~Copyable>(
@@ -101,8 +101,8 @@ private func useMPSCAsSPSC<Q: MPSCQueueProtocol & ~Copyable>(
 }
 
 @Test func mpscCategoryRefinesSPSC() {
-  useMPSCAsSPSC(Queue<Int>())
-  useMPSCAsSPSC(LockFreeMPSCQueue<Int>())
+  useMPSCAsSPSC(UnboundedQueue<Int>())
+  useMPSCAsSPSC(LinkedQueue<Int>())
 }
 
 private func inspectLifecycle<S: QueueLifecycleProtocol & QueueInspectionProtocol>(
@@ -144,9 +144,9 @@ private func exerciseLockFreeSupervisor<Q: MPSCQueueProtocol & ~Copyable>(
 }
 
 @Test func supervisorCapabilitiesAreUsableThroughProtocols() {
-  exerciseLockBasedSupervisor(Queue<Int>())
+  exerciseLockBasedSupervisor(UnboundedQueue<Int>())
   exerciseLockBasedSupervisor(BoundedQueue<Int>(capacity: 2))
-  exerciseLockFreeSupervisor(LockFreeMPSCQueue<Int>())
+  exerciseLockFreeSupervisor(LinkedQueue<Int>())
 }
 
 private func blockingEnqueue<P: BlockingQueueProducerProtocol & ~Copyable>(
@@ -168,7 +168,7 @@ private func tryTake<C: TryQueueConsumerProtocol & ~Copyable>(
   blockingEnqueue(bounded.producer)
   release(bounded.consumer)
 
-  let lockFree = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let lockFree = LinkedQueue<Int>().split(.mpsc)
   let accepted = lockFree.producer.enqueue(1)
   #expect(accepted)
   tryTake(lockFree.consumer)
@@ -215,11 +215,11 @@ private func tryTake<C: TryQueueConsumerProtocol & ~Copyable>(
     }
   }
 
-  roundTripMPSC(Queue<SingleShot>())
+  roundTripMPSC(UnboundedQueue<SingleShot>())
   roundTripMPSC(BoundedQueue<SingleShot>(capacity: 2))
-  roundTripMPSC(LockFreeMPSCQueue<SingleShot>())
-  roundTripSPMC(Queue<SingleShot>())
+  roundTripMPSC(LinkedQueue<SingleShot>())
+  roundTripSPMC(UnboundedQueue<SingleShot>())
   roundTripSPMC(BoundedQueue<SingleShot>(capacity: 2))
-  roundTripMPMC(Queue<SingleShot>())
+  roundTripMPMC(UnboundedQueue<SingleShot>())
   roundTripMPMC(BoundedQueue<SingleShot>(capacity: 2))
 }
