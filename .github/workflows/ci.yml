@@ -49,9 +49,21 @@ jobs:
           swift-version: "6.4.2"
       - name: Show toolchain
         run: swift --version
+      - name: Build (ThreadSanitizer)
+        if: matrix.config == 'debug'
+        env:
+          TSAN_OPTIONS: symbolize=0
+        run: swift build -c debug --sanitize=thread
+      - name: Test (ThreadSanitizer)
+        if: matrix.config == 'debug'
+        env:
+          TSAN_OPTIONS: symbolize=0
+        run: swift test -c debug --sanitize=thread
       - name: Build
+        if: matrix.config != 'debug'
         run: swift build -c ${{ matrix.config }}
       - name: Test
+        if: matrix.config != 'debug'
         run: swift test -c ${{ matrix.config }}
 
   # setup-swift does not install Swift 6 on Windows (v2 stops at 5.6.3 and v3
@@ -75,22 +87,6 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
-
-  # Passes locally, but the sanitized test binary produces no output and does
-  # not finish on the hosted macOS runner (fresh runs hang after the build).
-  # Run it on demand until that is understood so PR checks stay fast.
-  tsan:
-    name: ThreadSanitizer (on demand)
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: xcode-27
-    timeout-minutes: 20
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - name: Test with ThreadSanitizer
-        env:
-          TSAN_OPTIONS: symbolize=0
-        run: swift test --sanitize=thread
 
   apple-platforms:
     name: ${{ matrix.destination }}
