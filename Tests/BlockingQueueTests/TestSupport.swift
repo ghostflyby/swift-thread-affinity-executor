@@ -5,7 +5,6 @@
 
 import Dispatch
 import Foundation
-import Synchronization
 import Testing
 @testable import BlockingQueue
 
@@ -21,33 +20,47 @@ func awaitSignal(_ semaphore: DispatchSemaphore) async {
   }
 }
 
-/// Mutex-guarded box for synchronizing test observations.
-final class Box<T: Sendable>: Sendable {
-  private let value: Mutex<T>
+/// Lock-guarded box for synchronizing test observations.
+///
+/// `Synchronization.Mutex` is not visible to TSan on Linux, so TSan reports
+/// the protected accesses as races. `NSLock` is pthread-backed on every
+/// supported platform and is understood by the sanitizer.
+final class Box<T: Sendable>: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: T
 
   init(_ value: T) {
-    self.value = Mutex(value)
+    self.value = value
   }
 
   func set(_ newValue: T) {
-    value.withLock { $0 = newValue }
+    lock.lock()
+    defer { lock.unlock() }
+    value = newValue
   }
 
   func get() -> T {
-    value.withLock { $0 }
+    lock.lock()
+    defer { lock.unlock() }
+    return value
   }
 }
 
-/// Mutex-protected sink for concurrently consumed elements.
-final class Collector: Sendable {
-  private let values = Mutex<[Int]>([])
+/// Lock-protected sink for concurrently consumed elements.
+final class Collector: @unchecked Sendable {
+  private let lock = NSLock()
+  private var values: [Int] = []
 
   func append(_ value: Int) {
-    values.withLock { $0.append(value) }
+    lock.lock()
+    defer { lock.unlock() }
+    values.append(value)
   }
 
   func snapshot() -> [Int] {
-    values.withLock { $0 }
+    lock.lock()
+    defer { lock.unlock() }
+    return values
   }
 }
 
