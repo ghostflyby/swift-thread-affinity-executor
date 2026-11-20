@@ -7,7 +7,7 @@ Thread-affinity executors for Swift Concurrency: every job accepted by one of th
 | Type | Notes | Status |
 | --- | --- | --- |
 | `BlockingQueue` (separate library product) | Split-endpoint blocking FIFO queues (`Queue` unbounded / `BoundedQueue` fixed capacity); endpoint shape fixed at split time — `split(.spsc)` / `.mpsc` / `.spmc` / `.mpmc`; elements cross by ownership transfer (`sending`) | ✅ |
-| `LockFreeMPSCQueue` (in `BlockingQueue`) | Lock-free unbounded MPSC (`split(.mpsc)`); one node per element, atomic enqueue/`tryTake`, condition-parked blocking `take`; exclusive consumer, no `drainAll` | ✅ |
+| `LockFreeMPSCQueue` (in `BlockingQueue`) | Lock-free unbounded MPSC (`split(.mpsc)`, or the move-only `.spsc` view); one node per element, atomic enqueue/`tryTake`, condition-parked blocking `take`; exclusive consumer, no `drainAll` | ✅ |
 | `ThreadID` | Cross-platform OS thread ID value type | ✅ |
 | `ThreadBoundExecutor` | `SerialExecutor + TaskExecutor` protocol bound to one OS thread | ✅ |
 | `DedicatedThreadExecutor` | Dedicated `Foundation.Thread` with optional on-thread `initialize`/`finalize` | ✅ |
@@ -75,9 +75,9 @@ let executor = try await AttachedThreadExecutor.attach(to: myEventLoopDispatcher
 
 ### Queue endpoint shapes
 
-`BlockingQueue` fixes the endpoint shape when the construction token is
-split. Exclusive ends have no `share()` upgrade, so the shape is a static
-guarantee:
+`Queue` and `BoundedQueue` fix the endpoint shape when the construction
+token is split. Exclusive ends have no `share()` upgrade, so the shape is a
+static guarantee:
 
 | Shape | Split call | Producer | Consumer |
 | --- | --- | --- | --- |
@@ -85,6 +85,13 @@ guarantee:
 | MPSC | `split(.mpsc)` | `SharedQueueProducer` / `SharedBoundedQueueProducer` | `QueueConsumer` |
 | SPMC | `split(.spmc)` | `QueueProducer` / `BoundedQueueProducer` | `SharedQueueConsumer` |
 | MPMC | `split(.mpmc)` | `SharedQueueProducer` / `SharedBoundedQueueProducer` | `SharedQueueConsumer` |
+
+`LockFreeMPSCQueue` has its own endpoints: `split(.mpsc)` returns the
+cloneable `LockFreeMPSCQueueProducer` and the exclusive
+`LockFreeMPSCQueueConsumer`; `split(.spsc)` returns
+`LockFreeMPSCQueueExclusiveProducer`, a move-only view that holds the shared
+producer reference without exposing it, together with the same consumer and
+supervisor.
 
 ```swift
 import BlockingQueue
@@ -106,8 +113,9 @@ producer.close()
 Migrating from the previous split API:
 
 - `queue.split()` → `queue.split(.spsc)`.
-- `QueueEnds` / `BoundedQueueEnds` → `SPSCQueueEnds` /
-  `BoundedSPSCQueueEnds`.
+- The previous split-result types `QueueEnds` / `BoundedQueueEnds` are now
+  the generic `QueueEnds` bundle; for the `.spsc` shape use
+  `SPSCQueueEnds` / `BoundedSPSCQueueEnds`.
 - `split()` followed by `producer.share()` → construct with `split(.mpsc)`;
   use `split(.mpmc)` when the consumer side is shared as well.
 - `split()` followed by `consumer.share()` → `split(.spmc)` /
@@ -151,11 +159,14 @@ racing with `enqueue` is linearized: an element accepted by `enqueue` is
 delivered while a consumer remains, and the queue does not seal around an
 in-flight producer; releasing the consumer end waits for in-flight producers
 before `isSealed` becomes true (an enqueue accepted before the release whose
-link lands after it is stranded, since no taker remains). `split` returns a `sending` bundle: the
-producer and supervisor are `Sendable` and can be shared, while the consumer is
-non-`Sendable` and must stay in the domain it was handed to. The cell
-additionally traps on concurrent consumer entry. The supervisor exposes no
-`drainAll`; drain through the consumer.
+link lands after it is stranded, since no taker remains). `split(.mpsc)`
+returns a `sending` bundle: the producer and supervisor are `Sendable` and can
+be shared, while the consumer is non-`Sendable` and must stay in the domain it
+was handed to. `split(.spsc)` returns the same consumer and supervisor with a
+move-only `LockFreeMPSCQueueExclusiveProducer`, so the single-producer shape
+does not expose the shared class reference. The cell additionally traps on
+concurrent consumer entry. The supervisor exposes no `drainAll`; drain through
+the consumer.
 
 ### Capability protocols
 
@@ -192,10 +203,11 @@ The category protocols form a lattice:
 
 `Queue` and `BoundedQueue` declare only `MPMCQueueProtocol`;
 `LockFreeMPSCQueue` declares `MPSCQueueProtocol`, so it is also usable
-wherever `SPSCQueueProtocol` is required. Its `split(.spsc)` forwards to
-the `.mpsc` ends; the shared producer is typed as single-capable, so SPSC
-generic code cannot clone it. A generic function can require a category
-and call that `split` directly:
+wherever `SPSCQueueProtocol` is required. Its `split(.spsc)` returns the
+move-only `LockFreeMPSCQueueExclusiveProducer` wrapper over the shared
+reference, so SPSC generic code cannot clone it and the shared class is not
+exposed. A generic function can require a category and call that `split`
+directly:
 
 ```swift
 func drive<Q: MPSCQueueProtocol & ~Copyable>(_ queue: consuming Q)
@@ -206,20 +218,24 @@ where Q.Element == Int {
 }
 ```
 
-The endpoint refinement (`Multi…: Single…`) is what makes an inherited
-single-sided split valid for shared ends. The category protocols use
-prefixed associated types (`SPSCProducer`, `MPSCProducer`, …) because one
-token implements several categories; their conformances are declared inside
-the token type declarations so move-only element types are supported.
-`Queue` is a multi-shape construction token, so a category constraint
-describes what it can be split into, not an exclusive identity.
+The endpoint refinement (`Multi…: Single…`) makes shared endpoint types
+eligible for the inherited single-sided constraints; the lock-free token
+additionally wraps its shared producer for the concrete `.spsc` shape. The
+category protocols use prefixed associated types (`SPSCProducer`,
+`MPSCProducer`, …) because one token implements several categories; their
+conformances are declared inside the token type declarations so move-only
+element types are supported. `Queue` is a multi-shape construction token, so
+a category constraint describes what it can be split into, not an exclusive
+identity.
 
 `QueueEnds<P, C, S>` composes a producer, consumer and supervisor with one
-shared element type. The existing ends names — `SPSCQueueEnds`,
-`BoundedMPSCQueueEnds`, `LockFreeMPSCQueueEnds`, … — are aliases of that
-generic bundle. The lock-free consumer is non-`Sendable`, so
-`LockFreeMPSCQueueEnds` is non-`Sendable`; its producer and supervisor remain
-`Sendable`.
+shared element type. Its initializer is public, so another queue family can
+build the bundle and conform to the category protocols. The existing ends
+names — `SPSCQueueEnds`, `BoundedMPSCQueueEnds`, `LockFreeMPSCQueueEnds`,
+`LockFreeSPSCQueueEnds`, … — are aliases of that generic bundle. The lock-free
+consumer is non-`Sendable`, so both lock-free ends bundles are non-`Sendable`;
+the `.mpsc` producer and supervisor remain `Sendable`, and the `.spsc`
+producer is the move-only exclusive wrapper.
 
 ## Build / test
 

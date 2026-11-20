@@ -105,6 +105,76 @@ private func useMPSCAsSPSC<Q: MPSCQueueProtocol & ~Copyable>(
   useMPSCAsSPSC(LockFreeMPSCQueue<Int>())
 }
 
+private func inspectLifecycle<S: QueueLifecycleProtocol & QueueInspectionProtocol>(
+  _ supervisor: S
+) where S.Element == Int {
+  #expect(supervisor.count == 1)
+  #expect(supervisor.isClosed == false)
+  supervisor.close()
+  #expect(supervisor.isClosed)
+}
+
+private func drainSupervisor<S: QueueDrainProtocol>(
+  _ supervisor: S
+) where S.Element == Int {
+  var drained = supervisor.drainAll()
+  #expect(drained.count == 1)
+  #expect(drained.popFirst() == 1)
+}
+
+private func exerciseLockBasedSupervisor<Q: MPMCQueueProtocol & ~Copyable>(
+  _ token: consuming Q
+) where Q.Element == Int, Q.MPMCSupervisor: QueueDrainProtocol {
+  let ends = token.split(.mpmc)
+  let accepted = ends.producer.enqueue(1)
+  #expect(accepted)
+  inspectLifecycle(ends.supervisor)
+  drainSupervisor(ends.supervisor)
+  release(ends.consumer)
+}
+
+private func exerciseLockFreeSupervisor<Q: MPSCQueueProtocol & ~Copyable>(
+  _ token: consuming Q
+) where Q.Element == Int {
+  let ends = token.split(.mpsc)
+  let accepted = ends.producer.enqueue(1)
+  #expect(accepted)
+  inspectLifecycle(ends.supervisor)
+  release(ends.consumer)
+}
+
+@Test func supervisorCapabilitiesAreUsableThroughProtocols() {
+  exerciseLockBasedSupervisor(Queue<Int>())
+  exerciseLockBasedSupervisor(BoundedQueue<Int>(capacity: 2))
+  exerciseLockFreeSupervisor(LockFreeMPSCQueue<Int>())
+}
+
+private func blockingEnqueue<P: BlockingQueueProducerProtocol & ~Copyable>(
+  _ producer: consuming P
+) where P.Element == Int {
+  let accepted = producer.enqueueBlocking(1)
+  #expect(accepted)
+}
+
+private func tryTake<C: TryQueueConsumerProtocol & ~Copyable>(
+  _ consumer: borrowing C
+) where C.Element == Int {
+  let value = consumer.tryTake()
+  #expect(value == 1)
+}
+
+@Test func optionalEndpointCapabilitiesAreUsableThroughProtocols() {
+  let bounded = BoundedQueue<Int>(capacity: 1).split(.mpsc)
+  blockingEnqueue(bounded.producer)
+  release(bounded.consumer)
+
+  let lockFree = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let accepted = lockFree.producer.enqueue(1)
+  #expect(accepted)
+  tryTake(lockFree.consumer)
+  release(lockFree.consumer)
+}
+
 @Test func categoryProtocolsAcceptNonCopyableElements() {
   func roundTripMPSC<Q: MPSCQueueProtocol & ~Copyable>(
     _ token: consuming Q
@@ -119,7 +189,37 @@ private func useMPSCAsSPSC<Q: MPSCQueueProtocol & ~Copyable>(
     }
   }
 
+  func roundTripSPMC<Q: SPMCQueueProtocol & ~Copyable>(
+    _ token: consuming Q
+  ) where Q.Element == SingleShot {
+    let ends = token.split(.spmc)
+    let accepted = ends.producer.enqueue(SingleShot())
+    #expect(accepted)
+    let value = ends.consumer.take()
+    switch consume value {
+    case .some: break
+    case .none: Issue.record("expected an element")
+    }
+  }
+
+  func roundTripMPMC<Q: MPMCQueueProtocol & ~Copyable>(
+    _ token: consuming Q
+  ) where Q.Element == SingleShot {
+    let ends = token.split(.mpmc)
+    let accepted = ends.producer.enqueue(SingleShot())
+    #expect(accepted)
+    let value = ends.consumer.take()
+    switch consume value {
+    case .some: break
+    case .none: Issue.record("expected an element")
+    }
+  }
+
   roundTripMPSC(Queue<SingleShot>())
   roundTripMPSC(BoundedQueue<SingleShot>(capacity: 2))
   roundTripMPSC(LockFreeMPSCQueue<SingleShot>())
+  roundTripSPMC(Queue<SingleShot>())
+  roundTripSPMC(BoundedQueue<SingleShot>(capacity: 2))
+  roundTripMPMC(Queue<SingleShot>())
+  roundTripMPMC(BoundedQueue<SingleShot>(capacity: 2))
 }

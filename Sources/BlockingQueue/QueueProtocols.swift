@@ -79,7 +79,7 @@ where P.Element == C.Element, P.Element == S.Element, P.Element: ~Copyable {
   public let consumer: C
   public let supervisor: S
 
-  init(producer: consuming P, consumer: consuming C, supervisor: S) {
+  public init(producer: consuming P, consumer: consuming C, supervisor: S) {
     self.producer = producer
     self.consumer = consumer
     self.supervisor = supervisor
