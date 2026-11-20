@@ -7,7 +7,11 @@ import DequeModule
 
 /// Non-minting control handle over a split queue: closes production, awaits
 /// the terminal state, inspects and drains. Cannot create ends.
-public final class QueueSupervisor<Element: ~Copyable>: Sendable {
+public final class QueueSupervisor<Element: ~Copyable>: Sendable, QueueLifecycleProtocol,
+  QueueInspectionProtocol, QueueDrainProtocol
+{
+  public typealias Element = Element
+
   let cell: QueueCell<Element>
 
   init(cell: QueueCell<Element>) {

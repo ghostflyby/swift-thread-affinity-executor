@@ -157,6 +157,28 @@ non-`Sendable` and must stay in the domain it was handed to. The cell
 additionally traps on concurrent consumer entry. The supervisor exposes no
 `drainAll`; drain through the consumer.
 
+### Capability protocols
+
+The lock-based and lock-free queues expose their capabilities through one
+protocol set, so generic code can accept either implementation:
+
+| Protocol | Requirement |
+| --- | --- |
+| `QueueProducerProtocol<Element>` | non-blocking `enqueue` |
+| `BlockingQueueProducerProtocol<Element>` | `enqueueBlocking` (bounded producers only) |
+| `QueueConsumerProtocol<Element>` | blocking `take` |
+| `TryQueueConsumerProtocol<Element>` | non-blocking `tryTake` (lock-free consumer only) |
+| `QueueLifecycleProtocol` | `close` / `isClosed` / `isSealed` / `waitUntilSealed` |
+| `QueueInspectionProtocol<Element>` | `count` |
+| `QueueDrainProtocol<Element>` | `drainAll` (lock-based supervisor only) |
+
+`QueueEnds<P, C, S>` composes a producer, consumer and supervisor with one
+shared element type. The existing ends names — `SPSCQueueEnds`,
+`BoundedMPSCQueueEnds`, `LockFreeMPSCQueueEnds`, … — are aliases of that
+generic bundle. The lock-free consumer is non-`Sendable`, so
+`LockFreeMPSCQueueEnds` is non-`Sendable`; its producer and supervisor remain
+`Sendable`.
+
 ## Build / test
 
 ```bash
