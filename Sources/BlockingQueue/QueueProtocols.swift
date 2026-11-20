@@ -89,6 +89,9 @@ where P.Element == C.Element, P.Element == S.Element, P.Element: ~Copyable {
 extension QueueEnds: Sendable where P: Sendable, C: Sendable, S: Sendable {}
 
 /// A producer end usable as the only producer.
+///
+/// A usage capability, not a value-type guarantee: a struct can hide a shared
+/// reference, and exclusivity is enforced by the concrete endpoint.
 public protocol SingleProducerProtocol<Element>: QueueProducerProtocol, ~Copyable
 where Element: ~Copyable {}
 
@@ -97,6 +100,9 @@ public protocol MultiProducerProtocol<Element>: SingleProducerProtocol
 where Element: ~Copyable {}
 
 /// A consumer end usable as the only consumer.
+///
+/// A usage capability, not a value-type guarantee: a struct can hide a shared
+/// reference, and exclusivity is enforced by the concrete endpoint.
 public protocol SingleConsumerProtocol<Element>: QueueConsumerProtocol, ~Copyable
 where Element: ~Copyable {}
 
