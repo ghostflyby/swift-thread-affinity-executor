@@ -127,7 +127,7 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
     activeProducers.wrappingAdd(1, ordering: .sequentiallyConsistent)
 
     guard !closed.load(ordering: .sequentiallyConsistent) else {
-      activeProducers.wrappingSubtract(1, ordering: .sequentiallyConsistent)
+      finishProducer()
       atomicMemoryFence(ordering: .sequentiallyConsistent)
       wakeConsumerIfNeeded()
       return false
@@ -141,10 +141,27 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
     node.initialize(to: Node(element: element))
     let previous = tail.exchange(node, ordering: .acquiringAndReleasing)
     previous.pointee.next.store(node, ordering: .releasing)
-    activeProducers.wrappingSubtract(1, ordering: .sequentiallyConsistent)
+    finishProducer()
     atomicMemoryFence(ordering: .sequentiallyConsistent)
     wakeConsumerIfNeeded()
     return true
+  }
+
+  /// Drops the in-flight producer count. If the consumer end is already gone
+  /// and this was the last in-flight enqueue, no consumer observation can seal
+  /// the queue anymore, so the producer seals it here. This keeps `isSealed`
+  /// from becoming true while a producer is still between its `closed` check
+  /// and its link.
+  private func finishProducer() {
+    let remaining = activeProducers.wrappingSubtract(
+      1, ordering: .sequentiallyConsistent
+    ).newValue
+    if remaining == 0,
+      closed.load(ordering: .sequentiallyConsistent),
+      consumerCount.load(ordering: .sequentiallyConsistent) == 0
+    {
+      markSealed()
+    }
   }
 
   /// Signals a parked consumer, taking the condition lock only when one is
@@ -158,8 +175,10 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
   }
 
   /// Removes and returns the element at the front, or `nil` when none is
-  /// currently linked. Never waits. Observing a closed, fully drained queue
-  /// seals it, like the terminal return of `take()`.
+  /// currently linked. Never waits. An empty observation seals the queue only
+  /// when it is closed, no producer is in flight, and the queue is drained.
+  /// While a producer is in flight, `nil` is not terminal: a non-blocking
+  /// drain must keep calling until `supervisor.isSealed` (or use `take()`).
   func tryTake() -> Element? {
     enterTaker()
     defer { leaveTaker() }
@@ -280,16 +299,23 @@ final class LockFreeMPSCQueueCell<Element: ~Copyable>: @unchecked Sendable {
     elementCondition.unlock()
   }
 
-  /// Releasing the last consumer end seals the queue.
+  /// Releasing the last consumer end closes production and seals the queue,
+  /// but only once in-flight producers have finished. A producer that passed
+  /// its `closed` check before the release may still publish; it is stranded
+  /// (there is no taker), but `isSealed` does not race it.
   func removeConsumer() {
-    guard consumerCount.wrappingSubtract(1, ordering: .acquiringAndReleasing).newValue == 0 else {
+    guard
+      consumerCount.wrappingSubtract(1, ordering: .sequentiallyConsistent).newValue == 0
+    else {
       return
     }
     closed.store(true, ordering: .sequentiallyConsistent)
     elementCondition.lock()
     elementCondition.broadcast()
     elementCondition.unlock()
-    markSealed()
+    if activeProducers.load(ordering: .sequentiallyConsistent) == 0 {
+      markSealed()
+    }
   }
 
   var isClosed: Bool { closed.load(ordering: .acquiring) }

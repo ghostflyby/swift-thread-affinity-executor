@@ -133,6 +133,44 @@ private func waitForParkedConsumer<Element: ~Copyable>(
   release(consumer)
 }
 
+/// A non-blocking drain must continue until the supervisor is sealed; an empty
+/// `tryTake()` while a producer is in flight is not terminal.
+@Test func lockFreeNonBlockingDrainContinuesUntilSealed() {
+  let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+  let producer = ends.producer
+  let consumer = ends.consumer
+  let supervisor = ends.supervisor
+  let accepted = Atomic<Int>(0)
+
+  let producerDone = DispatchSemaphore(value: 0)
+  DispatchQueue.global().async {
+    for value in 0..<5_000 {
+      if producer.enqueue(value) {
+        accepted.wrappingAdd(1, ordering: .relaxed)
+      }
+    }
+    producer.close()
+    producerDone.signal()
+  }
+
+  var received = 0
+  while true {
+    if consumer.tryTake() != nil {
+      received += 1
+      continue
+    }
+    if supervisor.isSealed {
+      break
+    }
+    Thread.sleep(forTimeInterval: 0.0001)
+  }
+
+  producerDone.wait()
+  #expect(received == accepted.load(ordering: .relaxed))
+  #expect(supervisor.isSealed)
+  release(consumer)
+}
+
 /// The count increment must happen-before the link that makes an element
 /// visible; otherwise a concurrent take can decrement first and expose a
 /// negative element count.

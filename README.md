@@ -141,13 +141,18 @@ while let value = consumer.take() {  // blocks; nil after close + drain
 ```
 
 `tryTake()` is the non-blocking dequeue; its `nil` means "currently empty".
-An empty observation of a closed queue also seals it, so draining with
-`tryTake()` is terminal for the supervisor. `take()` parks on a condition
-variable, and a producer takes that condition only when a consumer is parked —
-the data path stays lock-free. `close()` racing with `enqueue` is linearized:
-an element accepted by `enqueue` is delivered, and the queue does not seal
-around an in-flight producer. `split` returns a `sending` bundle: the producer
-and supervisor are `Sendable` and can be shared, while the consumer is
+An empty observation of a closed queue seals it only when no producer is in
+flight; while an in-flight producer exists, `nil` is not terminal and a
+non-blocking drain must continue until `supervisor.isSealed`. `take()` is the
+blocking shutdown path: it parks on a condition variable until an element
+arrives or the terminal state is observed, and a producer takes that condition
+only when a consumer is parked — the data path stays lock-free. `close()`
+racing with `enqueue` is linearized: an element accepted by `enqueue` is
+delivered while a consumer remains, and the queue does not seal around an
+in-flight producer; releasing the consumer end waits for in-flight producers
+before `isSealed` becomes true (an element accepted after the release is
+stranded, since no taker remains). `split` returns a `sending` bundle: the
+producer and supervisor are `Sendable` and can be shared, while the consumer is
 non-`Sendable` and must stay in the domain it was handed to. The cell
 additionally traps on concurrent consumer entry. The supervisor exposes no
 `drainAll`; drain through the consumer.

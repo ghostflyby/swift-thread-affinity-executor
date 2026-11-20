@@ -23,10 +23,10 @@
 /// an element accepted by `enqueue` is delivered, and the queue never seals
 /// while a producer is between its close check and its link.
 ///
-/// The token is non-`Sendable`. `split(_:)` returns a `sending` bundle: the
-/// shared producer and supervisor can cross domains, while the exclusive
-/// consumer is non-`Sendable` and stays in the domain it was handed to.
-public struct LockFreeMPSCQueue<Element: ~Copyable>: ~Copyable {
+/// `split(_:)` returns a `sending` bundle: the shared producer and supervisor
+/// can cross domains, while the exclusive consumer is non-`Sendable` and stays
+/// in the domain it was handed to.
+public struct LockFreeMPSCQueue<Element: ~Copyable>: ~Copyable, Sendable {
   let cell: LockFreeMPSCQueueCell<Element>
 
   public init() {
@@ -124,9 +124,10 @@ public struct LockFreeMPSCQueueConsumer<Element: ~Copyable>: ~Copyable {
   }
 
   /// Removes and returns the front element, or `nil` when nothing is
-  /// currently linked. Never waits. An empty observation of a closed queue
-  /// seals it, so draining with `tryTake()` still makes
-  /// `supervisor.isSealed` / `waitUntilSealed()` terminal.
+  /// currently linked. Never waits. An empty observation seals the queue only
+  /// when it is closed, drained and free of in-flight producers; while a
+  /// producer is in flight, `nil` is not terminal, so a non-blocking drain
+  /// must continue until `supervisor.isSealed` (or use `take()`).
   ///
   /// The element is handed over (`sending`).
   @discardableResult
@@ -171,7 +172,7 @@ public final class LockFreeMPSCQueueSupervisor<Element: ~Copyable>: Sendable {
   }
 
   /// Terminal state: closed, fully drained and free of in-flight producers,
-  /// or no consumer end remains.
+  /// or no consumer end remains (after any in-flight producer finishes).
   public var isSealed: Bool {
     cell.isSealed
   }

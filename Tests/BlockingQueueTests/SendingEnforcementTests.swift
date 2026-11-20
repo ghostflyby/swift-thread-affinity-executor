@@ -41,7 +41,32 @@ private enum CompileCheckError: Error {
   /// module and its dependencies. Only the products directory qualifies —
   /// intermediate build directories hold scattered copies, and index builds
   /// mirror the module without being the product `swift test` links against.
+  /// Whether `directory` contains both modules this test compiles against.
+  private func isProductsDirectory(_ directory: URL) -> Bool {
+    FileManager.default.fileExists(
+      atPath: directory.appendingPathComponent("BlockingQueue.swiftmodule").path
+    )
+      && FileManager.default.fileExists(
+        atPath: directory.appendingPathComponent("DequeModule.swiftmodule").path)
+  }
+
+  /// Locates the products directory of the configuration currently under
+  /// test. The test bundle path on the helper command line is authoritative;
+  /// the modification-time fallback is only for layouts where that path is
+  /// unavailable.
   private func productsDirectory() throws -> String {
+    if let flag = CommandLine.arguments.firstIndex(of: "--test-bundle-path"),
+      flag + 1 < CommandLine.arguments.count
+    {
+      var candidate = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
+      for _ in 0..<5 {
+        if isProductsDirectory(candidate) {
+          return candidate.path
+        }
+        candidate = candidate.deletingLastPathComponent()
+      }
+    }
+
     let testsDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     let packageRoot = testsDir.deletingLastPathComponent().deletingLastPathComponent()
     let buildRoot = packageRoot.appendingPathComponent(".build", isDirectory: true)
@@ -54,10 +79,7 @@ private enum CompileCheckError: Error {
         buildRoot
         .appendingPathComponent((candidate as NSString).deletingLastPathComponent)
       guard containing.path.contains("/Products/") else { continue }
-      guard
-        FileManager.default.fileExists(
-          atPath: containing.appendingPathComponent("DequeModule.swiftmodule").path)
-      else { continue }
+      guard isProductsDirectory(containing) else { continue }
       let modulePath = containing.appendingPathComponent("BlockingQueue.swiftmodule").path
       let attributes = try? FileManager.default.attributesOfItem(atPath: modulePath)
       let modified = (attributes?[.modificationDate] as? Date) ?? .distantPast
@@ -226,5 +248,38 @@ private enum CompileCheckError: Error {
       )
     }
     try expectSendingResults(products: products, swiftc: swiftc)
+  }
+
+  /// The exclusive consumer is non-`Sendable`; a `Sendable` holder cannot
+  /// store it, so safe code cannot share it across isolation domains.
+  @Test
+  func nonSendableConsumerCannotBeStoredInSendableHolder() throws {
+    let swiftc: String
+    let products: String
+    do {
+      swiftc = try swiftcPath()
+      products = try productsDirectory()
+    } catch {
+      Issue.record("compile-check harness unavailable: \(error)")
+      return
+    }
+
+    let source = """
+      import BlockingQueue
+
+      final class Holder: Sendable {
+        let consumer: LockFreeMPSCQueueConsumer<Int>
+
+        init(_ consumer: consuming LockFreeMPSCQueueConsumer<Int>) {
+          self.consumer = consumer
+        }
+      }
+      """
+    let result = try compile(source, products: products, swiftc: swiftc)
+    #expect(result.status != 0, "a non-Sendable consumer must not fit in a Sendable holder")
+    #expect(
+      result.diagnostics.contains("non-Sendable"),
+      "expected a non-Sendable diagnostic, got:\n\(result.diagnostics)"
+    )
   }
 #endif
