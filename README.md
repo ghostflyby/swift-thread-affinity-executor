@@ -127,12 +127,15 @@ queue, so they need not be `Sendable`.
 import BlockingQueue
 
 let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
-ends.producer.enqueue(1)  // never waits; the queue is unbounded
+let producer = ends.producer
+let consumer = ends.consumer
 
-let first = ends.consumer.tryTake()  // 1, or nil when currently empty
-ends.producer.close()
+producer.enqueue(1)  // never waits; the queue is unbounded
 
-while let value = ends.consumer.take() {  // blocks; nil after close + drain
+let first = consumer.tryTake()  // 1, or nil when currently empty
+producer.close()
+
+while let value = consumer.take() {  // blocks; nil after close + drain
   print(value)
 }
 ```
@@ -143,11 +146,11 @@ An empty observation of a closed queue also seals it, so draining with
 variable, and a producer takes that condition only when a consumer is parked —
 the data path stays lock-free. `close()` racing with `enqueue` is linearized:
 an element accepted by `enqueue` is delivered, and the queue does not seal
-around an in-flight producer. There is one consumer end; `take()`/`tryTake()`
-must be called from one thread at a time. `~Copyable` prevents duplicating the
-end but not concurrent borrows through a shared holder, so the cell traps on
-concurrent entry. The supervisor exposes no `drainAll`; drain through the
-consumer.
+around an in-flight producer. `split` returns a `sending` bundle: the producer
+and supervisor are `Sendable` and can be shared, while the consumer is
+non-`Sendable` and must stay in the domain it was handed to. The cell
+additionally traps on concurrent consumer entry. The supervisor exposes no
+`drainAll`; drain through the consumer.
 
 ## Build / test
 
@@ -164,7 +167,7 @@ Requires a Swift 6.4+ toolchain. Deployment floors: macOS 15 / iOS 18 / tvOS 18 
 - An executor attached to the main thread via `MainQueueDispatcher` shares the thread with `MainActor` but is not the same executor identity and does not replace it.
 - `MigratingThreadExecutor.migrate(to:)` and `handOver(to:)` require a successor pump whose fixed thread or queue is independent of the currently serving pump — a different wrapper around the same thread or queue still deadlocks. The handshake post queues behind the old serving loop, which exits only after retarget seals its queue, and retarget waits for the handshake. The handshake itself no longer blocks the successor's thread while the old generation drains; the serving loop is posted after the old finalize.
 - `FixedThreadDispatcher.post` returns `false` once the pump stops accepting work. Attachment and migration handshakes surface that as `AttachError.pumpUnavailable` / `MigrationError.pumpUnavailable`; `detach()` returns `false` when the finalize post is rejected instead of blocking forever. A pump that accepts a post but never runs it still leaves the join pending.
-- `LockFreeMPSCQueue` allocates a node plus its element storage per enqueued element and keeps them until the consumer takes it (or the queue is released). A blocking `take()` parks on an `NSCondition`; producers take that lock only when a consumer is parked, so enqueue is lock-free in the common case but a parked consumer adds a mutex-based wake path. Its supervisor has no `drainAll`: there is one consumer end, and a second taker would break the single-consumer head advance. The consumer cell traps on concurrent `take()`/`tryTake()` entry, so a shared holder cannot silently double-free the head.
+- `LockFreeMPSCQueue` allocates a node plus its element storage per enqueued element and keeps them until the consumer takes it (or the queue is released). A blocking `take()` parks on an `NSCondition`; producers take that lock only when a consumer is parked, so enqueue is lock-free in the common case but a parked consumer adds a mutex-based wake path. Its supervisor has no `drainAll`: the consumer end is exclusive and non-`Sendable`, and a second taker would break the single-consumer head advance. The consumer cell traps on concurrent `take()`/`tryTake()` entry, so a shared holder cannot silently double-free the head.
 
 ## License
 

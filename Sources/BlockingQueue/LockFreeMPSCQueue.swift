@@ -22,7 +22,11 @@
 /// consumed nodes are freed by the consumer. `close()`/`enqueue` race safely:
 /// an element accepted by `enqueue` is delivered, and the queue never seals
 /// while a producer is between its close check and its link.
-public struct LockFreeMPSCQueue<Element: ~Copyable>: ~Copyable, Sendable {
+///
+/// The token is non-`Sendable`. `split(_:)` returns a `sending` bundle: the
+/// shared producer and supervisor can cross domains, while the exclusive
+/// consumer is non-`Sendable` and stays in the domain it was handed to.
+public struct LockFreeMPSCQueue<Element: ~Copyable>: ~Copyable {
   let cell: LockFreeMPSCQueueCell<Element>
 
   public init() {
@@ -30,8 +34,10 @@ public struct LockFreeMPSCQueue<Element: ~Copyable>: ~Copyable, Sendable {
   }
 
   /// Splits the queue into a cloneable producer end, one exclusive consumer
-  /// end and a supervisor. Consumes the token.
-  public consuming func split(_ option: MPSCOption) -> LockFreeMPSCQueueEnds<Element> {
+  /// end and a supervisor. Consumes the token. The result is `sending`: the
+  /// consumer end is non-`Sendable`, so the bundle must be handed to one
+  /// domain rather than shared.
+  public consuming func split(_ option: MPSCOption) -> sending LockFreeMPSCQueueEnds<Element> {
     cell.registerEnds()
     return LockFreeMPSCQueueEnds<Element>(
       producer: LockFreeMPSCQueueProducer(cell: cell),
@@ -42,9 +48,9 @@ public struct LockFreeMPSCQueue<Element: ~Copyable>: ~Copyable, Sendable {
 }
 
 /// The capabilities handed out by `LockFreeMPSCQueue.split(.mpsc)`:
-/// move-only.
+/// move-only and non-`Sendable` because of the exclusive consumer end.
 @frozen
-public struct LockFreeMPSCQueueEnds<Element: ~Copyable>: ~Copyable, Sendable {
+public struct LockFreeMPSCQueueEnds<Element: ~Copyable>: ~Copyable {
   public let producer: LockFreeMPSCQueueProducer<Element>
   public let consumer: LockFreeMPSCQueueConsumer<Element>
   public let supervisor: LockFreeMPSCQueueSupervisor<Element>
@@ -96,16 +102,16 @@ public final class LockFreeMPSCQueueProducer<Element: ~Copyable>: Sendable {
   }
 }
 
-/// Single, move-only consumer end. Only one taker may exist, and only one
-/// call may be in flight at a time: `~Copyable` prevents duplicating the end,
-/// but a shared holder can still borrow it concurrently, so the cell traps on
-/// concurrent entry.
+/// Single, move-only, non-`Sendable` consumer end. It is confined to one
+/// isolation domain; there is exactly one taker, and only one call may be in
+/// flight at a time. Non-`Sendable` keeps it from being shared across domains;
+/// the cell additionally traps on concurrent entry.
 ///
 /// `tryTake()` never waits; `take()` parks on a condition variable until an
 /// element is available or the queue is closed and drained. The data path
 /// itself does not take that lock; producers touch it only when a consumer
 /// is parked.
-public struct LockFreeMPSCQueueConsumer<Element: ~Copyable>: ~Copyable, Sendable {
+public struct LockFreeMPSCQueueConsumer<Element: ~Copyable>: ~Copyable {
   let cell: LockFreeMPSCQueueCell<Element>
 
   init(cell: LockFreeMPSCQueueCell<Element>) {
