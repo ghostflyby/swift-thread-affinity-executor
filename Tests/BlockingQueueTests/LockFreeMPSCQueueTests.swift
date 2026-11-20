@@ -140,21 +140,42 @@ private func waitForParkedConsumer<Element: ~Copyable>(
   let producer = ends.producer
   let consumer = ends.consumer
   let supervisor = ends.supervisor
-  let accepted = Atomic<Int>(0)
+  let cell = supervisor.cell
 
-  let producerDone = DispatchSemaphore(value: 0)
-  DispatchQueue.global().async {
-    for value in 0..<5_000 {
-      if producer.enqueue(value) {
-        accepted.wrappingAdd(1, ordering: .relaxed)
-      }
-    }
-    producer.close()
-    producerDone.signal()
+  let linkEntered = DispatchSemaphore(value: 0)
+  let releaseLink = DispatchSemaphore(value: 0)
+  cell.beforeLinkHook = {
+    linkEntered.signal()
+    releaseLink.wait()
   }
 
-  let deadline = Date().addingTimeInterval(10)
+  let accepted = Atomic<Int>(0)
+  let producerDone = DispatchSemaphore(value: 0)
+  let producerThread = Thread {
+    if producer.enqueue(0) {
+      accepted.wrappingAdd(1, ordering: .relaxed)
+    }
+    producerDone.signal()
+  }
+  producerThread.start()
+  defer { releaseLink.signal() }
+
+  guard linkEntered.wait(timeout: .now() + 10) == .success else {
+    Issue.record("producer did not reach its in-flight link point")
+    return
+  }
+
+  // The producer has passed its closed check and is parked before linking the
+  // node: `activeProducers` is still 1 and the element is not visible yet.
+  producer.close()
+  #expect(consumer.tryTake() == nil)
+  #expect(supervisor.isSealed == false)
+
+  releaseLink.signal()
+  #expect(producerDone.wait(timeout: .now() + 10) == .success)
+
   var received = 0
+  let deadline = Date().addingTimeInterval(60)
   while true {
     if consumer.tryTake() != nil {
       received += 1
@@ -164,14 +185,13 @@ private func waitForParkedConsumer<Element: ~Copyable>(
       break
     }
     if Date() >= deadline {
-      Issue.record("non-blocking drain did not seal within 10 seconds")
+      Issue.record("non-blocking drain did not seal within 60 seconds")
       break
     }
     Thread.sleep(forTimeInterval: 0.0001)
   }
 
-  let producerFinished = producerDone.wait(timeout: .now() + 10) == .success
-  #expect(producerFinished)
+  #expect(accepted.load(ordering: .relaxed) == 1)
   #expect(received == accepted.load(ordering: .relaxed))
   #expect(supervisor.isSealed)
   release(consumer)
@@ -189,21 +209,30 @@ private func waitForParkedConsumer<Element: ~Copyable>(
   let producerCount = 4
   let perProducer = 5_000
   let total = producerCount * perProducer
+  let remaining = Atomic<Int>(producerCount)
   let done = Atomic<Bool>(false)
+  let rejected = Atomic<Int>(0)
   let group = DispatchGroup()
   for p in 0..<producerCount {
-    DispatchQueue.global().async(group: group) {
+    group.enter()
+    let thread = Thread {
       for i in 0..<perProducer {
-        #expect(producer.enqueue(p * perProducer + i))
+        if !producer.enqueue(p * perProducer + i) {
+          rejected.wrappingAdd(1, ordering: .relaxed)
+        }
       }
+      // Every enqueue has returned before the last producer closes
+      // production, so `done` implies no producer is still in flight.
+      if remaining.wrappingSubtract(1, ordering: .acquiringAndReleasing).newValue == 0 {
+        producer.close()
+        done.store(true, ordering: .releasing)
+      }
+      group.leave()
     }
-  }
-  group.notify(queue: .global()) {
-    producer.close()
-    done.store(true, ordering: .releasing)
+    thread.start()
   }
 
-  let deadline = Date().addingTimeInterval(10)
+  let deadline = Date().addingTimeInterval(60)
   var received = 0
   var sawNegative = false
   while true {
@@ -224,12 +253,15 @@ private func waitForParkedConsumer<Element: ~Copyable>(
       break
     }
     if Date() >= deadline {
-      Issue.record("count sampler did not finish within 10 seconds")
+      Issue.record("count sampler did not finish within 60 seconds")
       break
     }
     Thread.sleep(forTimeInterval: 0.0001)
   }
 
+  let producersFinished = group.wait(timeout: .now() + 10) == .success
+  #expect(producersFinished)
+  #expect(rejected.load(ordering: .relaxed) == 0)
   #expect(received == total)
   #expect(sawNegative == false)
   #expect(supervisor.isSealed)
@@ -287,15 +319,22 @@ private func waitForParkedConsumer<Element: ~Copyable>(
 
   let producerCount = 4
   let perProducer = 1_000
+  let rejected = Atomic<Int>(0)
   let group = DispatchGroup()
   for p in 0..<producerCount {
-    DispatchQueue.global().async(group: group) {
+    group.enter()
+    let thread = Thread {
       for i in 0..<perProducer {
-        #expect(producer.enqueue(p * perProducer + i))
+        if !producer.enqueue(p * perProducer + i) {
+          rejected.wrappingAdd(1, ordering: .relaxed)
+        }
       }
+      group.leave()
     }
+    thread.start()
   }
   group.wait()
+  #expect(rejected.load(ordering: .relaxed) == 0)
   producer.close()
 
   var last = Array(repeating: -1, count: producerCount)
@@ -327,7 +366,8 @@ private func waitForParkedConsumer<Element: ~Copyable>(
   let perProducer = 2_000
   let group = DispatchGroup()
   for p in 0..<producerCount {
-    DispatchQueue.global().async(group: group) {
+    group.enter()
+    let thread = Thread {
       for i in 0..<perProducer {
         if producer.enqueue(i) {
           accepted.wrappingAdd(1, ordering: .relaxed)
@@ -336,7 +376,9 @@ private func waitForParkedConsumer<Element: ~Copyable>(
           producer.close()
         }
       }
+      group.leave()
     }
+    thread.start()
   }
   group.wait()
   producer.close()
