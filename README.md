@@ -113,7 +113,7 @@ producer.close()
 Migrating from the previous API:
 
 - `Queue` → `UnboundedQueue`; `LockFreeMPSCQueue` → `LinkedQueue`.
-  `BoundedQueue` is unchanged. The old names remain as deprecated aliases.
+  `BoundedQueue` is unchanged. The old token names are removed.
 - `queue.split()` → `queue.split(.spsc)`.
 - The previous split-result types `QueueEnds` / `BoundedQueueEnds` are now
   the generic `QueueEnds` bundle; for the `.spsc` shape use

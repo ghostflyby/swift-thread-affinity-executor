@@ -77,9 +77,6 @@ public struct LinkedQueue<Element: ~Copyable>: ~Copyable, Sendable,
   }
 }
 
-@available(*, deprecated, renamed: "LinkedQueue")
-public typealias LockFreeMPSCQueue<Element: ~Copyable> = LinkedQueue<Element>
-
 /// The capabilities handed out by `LinkedQueue.split(.mpsc)`:
 /// move-only and non-`Sendable` because of the exclusive consumer end.
 public typealias LockFreeMPSCQueueEnds<Element: ~Copyable> = QueueEnds<

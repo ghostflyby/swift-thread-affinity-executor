@@ -88,9 +88,6 @@ public struct UnboundedQueue<Element: ~Copyable>: ~Copyable, Sendable, MPMCQueue
   }
 }
 
-@available(*, deprecated, renamed: "UnboundedQueue")
-public typealias Queue<Element: ~Copyable> = UnboundedQueue<Element>
-
 /// The capabilities handed out by `UnboundedQueue.split(.spsc)`: move-only.
 public typealias SPSCQueueEnds<Element: ~Copyable> = QueueEnds<
   QueueProducer<Element>, QueueConsumer<Element>, QueueSupervisor<Element>
