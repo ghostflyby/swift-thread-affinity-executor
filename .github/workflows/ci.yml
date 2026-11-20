@@ -57,12 +57,12 @@ jobs:
       - name: Build (ThreadSanitizer)
         if: matrix.config == 'debug'
         env:
-          TSAN_OPTIONS: symbolize=0
+          TSAN_OPTIONS: symbolize=1
         run: swift build -c debug --sanitize=thread
       - name: Test (ThreadSanitizer)
         if: matrix.config == 'debug'
         env:
-          TSAN_OPTIONS: symbolize=0
+          TSAN_OPTIONS: symbolize=1
         run: swift test -c debug --sanitize=thread
       - name: Build
         if: matrix.config != 'debug'
