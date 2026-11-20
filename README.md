@@ -171,6 +171,48 @@ protocol set, so generic code can accept either implementation:
 | `QueueLifecycleProtocol` | `close` / `isClosed` / `isSealed` / `waitUntilSealed` |
 | `QueueInspectionProtocol<Element>` | `count` |
 | `QueueDrainProtocol<Element>` | `drainAll` (lock-based supervisor only) |
+| `SingleProducerProtocol<Element>` | producer end usable as the only producer |
+| `MultiProducerProtocol<Element>` | shareable producer end; refines `SingleProducerProtocol` |
+| `SingleConsumerProtocol<Element>` | consumer end usable as the only consumer |
+| `MultiConsumerProtocol<Element>` | shareable consumer end; refines `SingleConsumerProtocol` |
+| `SPSCQueueProtocol<Element>` | `split(.spsc)`; base category |
+| `MPSCQueueProtocol<Element>` | refines SPSC; `split(.mpsc)` |
+| `SPMCQueueProtocol<Element>` | refines SPSC; `split(.spmc)` |
+| `MPMCQueueProtocol<Element>` | refines MPSC and SPMC; `split(.mpmc)` |
+
+The category protocols form a lattice:
+
+```
+            MPMC
+           /    \
+        MPSC    SPMC
+           \    /
+            SPSC
+```
+
+`Queue` and `BoundedQueue` declare only `MPMCQueueProtocol`;
+`LockFreeMPSCQueue` declares `MPSCQueueProtocol`, so it is also usable
+wherever `SPSCQueueProtocol` is required. Its `split(.spsc)` forwards to
+the `.mpsc` ends; the shared producer is typed as single-capable, so SPSC
+generic code cannot clone it. A generic function can require a category
+and call that `split` directly:
+
+```swift
+func drive<Q: MPSCQueueProtocol & ~Copyable>(_ queue: consuming Q)
+where Q.Element == Int {
+  let ends = queue.split(.mpsc)
+  ends.producer.enqueue(1)
+  ends.consumer.take()
+}
+```
+
+The endpoint refinement (`Multi…: Single…`) is what makes an inherited
+single-sided split valid for shared ends. The category protocols use
+prefixed associated types (`SPSCProducer`, `MPSCProducer`, …) because one
+token implements several categories; their conformances are declared inside
+the token type declarations so move-only element types are supported.
+`Queue` is a multi-shape construction token, so a category constraint
+describes what it can be split into, not an exclusive identity.
 
 `QueueEnds<P, C, S>` composes a producer, consumer and supervisor with one
 shared element type. The existing ends names — `SPSCQueueEnds`,

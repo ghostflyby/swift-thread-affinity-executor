@@ -28,11 +28,30 @@
 /// `split(_:)` returns a `sending` bundle: the shared producer and supervisor
 /// can cross domains, while the exclusive consumer is non-`Sendable` and stays
 /// in the domain it was handed to.
-public struct LockFreeMPSCQueue<Element: ~Copyable>: ~Copyable, Sendable {
+public struct LockFreeMPSCQueue<Element: ~Copyable>: ~Copyable, Sendable,
+  MPSCQueueProtocol
+{
+  public typealias Element = Element
+
+  public typealias SPSCProducer = LockFreeMPSCQueueProducer<Element>
+  public typealias SPSCConsumer = LockFreeMPSCQueueConsumer<Element>
+  public typealias SPSCSupervisor = LockFreeMPSCQueueSupervisor<Element>
+
+  public typealias MPSCProducer = LockFreeMPSCQueueProducer<Element>
+  public typealias MPSCConsumer = LockFreeMPSCQueueConsumer<Element>
+  public typealias MPSCSupervisor = LockFreeMPSCQueueSupervisor<Element>
+
   let cell: LockFreeMPSCQueueCell<Element>
 
   public init() {
     cell = LockFreeMPSCQueueCell()
+  }
+
+  /// Splits the queue into the exclusive single-producer view. The producer
+  /// end is the shared producer reference used as the only producer; MPSC
+  /// refines SPSC. Consumes the token.
+  public consuming func split(_ option: SPSCOption) -> sending LockFreeMPSCQueueEnds<Element> {
+    split(.mpsc)
   }
 
   /// Splits the queue into a cloneable producer end, one exclusive consumer
@@ -63,7 +82,7 @@ public typealias LockFreeMPSCQueueEnds<Element: ~Copyable> = QueueEnds<
 /// Production closes through `close()` or once the last producer reference
 /// is released.
 public final class LockFreeMPSCQueueProducer<Element: ~Copyable>: Sendable,
-  QueueProducerProtocol
+  QueueProducerProtocol, MultiProducerProtocol
 {
   public typealias Element = Element
 
@@ -107,7 +126,7 @@ public final class LockFreeMPSCQueueProducer<Element: ~Copyable>: Sendable,
 /// itself does not take that lock; producers touch it only when a consumer
 /// is parked.
 public struct LockFreeMPSCQueueConsumer<Element: ~Copyable>: ~Copyable,
-  QueueConsumerProtocol, TryQueueConsumerProtocol
+  QueueConsumerProtocol, TryQueueConsumerProtocol, SingleConsumerProtocol
 {
   public typealias Element = Element
 

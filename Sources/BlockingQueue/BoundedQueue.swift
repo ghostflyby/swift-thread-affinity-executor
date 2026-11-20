@@ -18,7 +18,27 @@
 /// `consuming sending` in on enqueue, `sending` out on take. The handoff
 /// is compiler-enforced (the check lives in the SIL sendability pass, so
 /// it surfaces on build rather than in a pure typecheck).
-public struct BoundedQueue<Element: ~Copyable>: ~Copyable, Sendable {
+public struct BoundedQueue<Element: ~Copyable>: ~Copyable, Sendable,
+  MPMCQueueProtocol
+{
+  public typealias Element = Element
+
+  public typealias SPSCProducer = BoundedQueueProducer<Element>
+  public typealias SPSCConsumer = QueueConsumer<Element>
+  public typealias SPSCSupervisor = QueueSupervisor<Element>
+
+  public typealias MPSCProducer = SharedBoundedQueueProducer<Element>
+  public typealias MPSCConsumer = QueueConsumer<Element>
+  public typealias MPSCSupervisor = QueueSupervisor<Element>
+
+  public typealias SPMCProducer = BoundedQueueProducer<Element>
+  public typealias SPMCConsumer = SharedQueueConsumer<Element>
+  public typealias SPMCSupervisor = QueueSupervisor<Element>
+
+  public typealias MPMCProducer = SharedBoundedQueueProducer<Element>
+  public typealias MPMCConsumer = SharedQueueConsumer<Element>
+  public typealias MPMCSupervisor = QueueSupervisor<Element>
+
   let cell: QueueCell<Element>
 
   /// - Precondition: `capacity >= 1`.
@@ -29,7 +49,7 @@ public struct BoundedQueue<Element: ~Copyable>: ~Copyable, Sendable {
 
   /// Splits the queue into one exclusive producer end, one exclusive
   /// consumer end and a supervisor — SPSC. Consumes the token.
-  public consuming func split(_ option: SPSCOption) -> BoundedSPSCQueueEnds<Element> {
+  public consuming func split(_ option: SPSCOption) -> sending BoundedSPSCQueueEnds<Element> {
     cell.registerEnds()
     return BoundedSPSCQueueEnds<Element>(
       producer: BoundedQueueProducer(cell: cell),
@@ -40,7 +60,7 @@ public struct BoundedQueue<Element: ~Copyable>: ~Copyable, Sendable {
 
   /// Splits the queue into a cloneable producer end, one exclusive consumer
   /// end and a supervisor — MPSC. Consumes the token.
-  public consuming func split(_ option: MPSCOption) -> BoundedMPSCQueueEnds<Element> {
+  public consuming func split(_ option: MPSCOption) -> sending BoundedMPSCQueueEnds<Element> {
     cell.registerEnds()
     return BoundedMPSCQueueEnds<Element>(
       producer: SharedBoundedQueueProducer(cell: cell),
@@ -51,7 +71,7 @@ public struct BoundedQueue<Element: ~Copyable>: ~Copyable, Sendable {
 
   /// Splits the queue into one exclusive producer end, a cloneable consumer
   /// end and a supervisor — SPMC. Consumes the token.
-  public consuming func split(_ option: SPMCOption) -> BoundedSPMCQueueEnds<Element> {
+  public consuming func split(_ option: SPMCOption) -> sending BoundedSPMCQueueEnds<Element> {
     cell.registerEnds()
     return BoundedSPMCQueueEnds<Element>(
       producer: BoundedQueueProducer(cell: cell),
@@ -62,7 +82,7 @@ public struct BoundedQueue<Element: ~Copyable>: ~Copyable, Sendable {
 
   /// Splits the queue into a cloneable producer end, a cloneable consumer
   /// end and a supervisor — MPMC. Consumes the token.
-  public consuming func split(_ option: MPMCOption) -> BoundedMPMCQueueEnds<Element> {
+  public consuming func split(_ option: MPMCOption) -> sending BoundedMPMCQueueEnds<Element> {
     cell.registerEnds()
     return BoundedMPMCQueueEnds<Element>(
       producer: SharedBoundedQueueProducer(cell: cell),
@@ -98,7 +118,7 @@ public typealias BoundedMPMCQueueEnds<Element: ~Copyable> = QueueEnds<
 /// (or `finish()`) closes production. There is no `share()` upgrade: the
 /// endpoint shape is fixed at split time.
 public struct BoundedQueueProducer<Element: ~Copyable>: ~Copyable, Sendable,
-  QueueProducerProtocol, BlockingQueueProducerProtocol
+  QueueProducerProtocol, BlockingQueueProducerProtocol, SingleProducerProtocol
 {
   public typealias Element = Element
 
@@ -147,7 +167,7 @@ public struct BoundedQueueProducer<Element: ~Copyable>: ~Copyable, Sendable,
 /// Production closes through `close()` or once the last producer reference
 /// is released.
 public final class SharedBoundedQueueProducer<Element: ~Copyable>: Sendable,
-  QueueProducerProtocol, BlockingQueueProducerProtocol
+  QueueProducerProtocol, BlockingQueueProducerProtocol, MultiProducerProtocol
 {
   public typealias Element = Element
 

@@ -9,7 +9,9 @@
 /// Minted by `split(.spsc)` / `split(.mpsc)`. Releasing the end
 /// seals the queue from the consumer side. There is no `share()` upgrade:
 /// the endpoint shape is fixed at split time.
-public struct QueueConsumer<Element: ~Copyable>: ~Copyable, Sendable, QueueConsumerProtocol {
+public struct QueueConsumer<Element: ~Copyable>: ~Copyable, Sendable,
+  QueueConsumerProtocol, SingleConsumerProtocol
+{
   public typealias Element = Element
 
   let cell: QueueCell<Element>
@@ -34,7 +36,9 @@ public struct QueueConsumer<Element: ~Copyable>: ~Copyable, Sendable, QueueConsu
 /// `split(.mpmc)`.
 ///
 /// Releasing the last reference seals the queue from the consumer side.
-public final class SharedQueueConsumer<Element: ~Copyable>: Sendable, QueueConsumerProtocol {
+public final class SharedQueueConsumer<Element: ~Copyable>: Sendable,
+  QueueConsumerProtocol, MultiConsumerProtocol
+{
   public typealias Element = Element
 
   private let cell: QueueCell<Element>

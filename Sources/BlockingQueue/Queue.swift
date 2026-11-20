@@ -18,7 +18,25 @@
 /// `consuming sending` in on enqueue, `sending` out on take. The handoff
 /// is compiler-enforced (the check lives in the SIL sendability pass, so
 /// it surfaces on build rather than in a pure typecheck).
-public struct Queue<Element: ~Copyable>: ~Copyable, Sendable {
+public struct Queue<Element: ~Copyable>: ~Copyable, Sendable, MPMCQueueProtocol {
+  public typealias Element = Element
+
+  public typealias SPSCProducer = QueueProducer<Element>
+  public typealias SPSCConsumer = QueueConsumer<Element>
+  public typealias SPSCSupervisor = QueueSupervisor<Element>
+
+  public typealias MPSCProducer = SharedQueueProducer<Element>
+  public typealias MPSCConsumer = QueueConsumer<Element>
+  public typealias MPSCSupervisor = QueueSupervisor<Element>
+
+  public typealias SPMCProducer = QueueProducer<Element>
+  public typealias SPMCConsumer = SharedQueueConsumer<Element>
+  public typealias SPMCSupervisor = QueueSupervisor<Element>
+
+  public typealias MPMCProducer = SharedQueueProducer<Element>
+  public typealias MPMCConsumer = SharedQueueConsumer<Element>
+  public typealias MPMCSupervisor = QueueSupervisor<Element>
+
   let cell: QueueCell<Element>
 
   public init() {
@@ -27,7 +45,7 @@ public struct Queue<Element: ~Copyable>: ~Copyable, Sendable {
 
   /// Splits the queue into one exclusive producer end, one exclusive
   /// consumer end and a supervisor — SPSC. Consumes the token.
-  public consuming func split(_ option: SPSCOption) -> SPSCQueueEnds<Element> {
+  public consuming func split(_ option: SPSCOption) -> sending SPSCQueueEnds<Element> {
     cell.registerEnds()
     return SPSCQueueEnds<Element>(
       producer: QueueProducer(cell: cell),
@@ -38,7 +56,7 @@ public struct Queue<Element: ~Copyable>: ~Copyable, Sendable {
 
   /// Splits the queue into a cloneable producer end, one exclusive consumer
   /// end and a supervisor — MPSC. Consumes the token.
-  public consuming func split(_ option: MPSCOption) -> MPSCQueueEnds<Element> {
+  public consuming func split(_ option: MPSCOption) -> sending MPSCQueueEnds<Element> {
     cell.registerEnds()
     return MPSCQueueEnds<Element>(
       producer: SharedQueueProducer(cell: cell),
@@ -49,7 +67,7 @@ public struct Queue<Element: ~Copyable>: ~Copyable, Sendable {
 
   /// Splits the queue into one exclusive producer end, a cloneable consumer
   /// end and a supervisor — SPMC. Consumes the token.
-  public consuming func split(_ option: SPMCOption) -> SPMCQueueEnds<Element> {
+  public consuming func split(_ option: SPMCOption) -> sending SPMCQueueEnds<Element> {
     cell.registerEnds()
     return SPMCQueueEnds<Element>(
       producer: QueueProducer(cell: cell),
@@ -60,7 +78,7 @@ public struct Queue<Element: ~Copyable>: ~Copyable, Sendable {
 
   /// Splits the queue into a cloneable producer end, a cloneable consumer
   /// end and a supervisor — MPMC. Consumes the token.
-  public consuming func split(_ option: MPMCOption) -> MPMCQueueEnds<Element> {
+  public consuming func split(_ option: MPMCOption) -> sending MPMCQueueEnds<Element> {
     cell.registerEnds()
     return MPMCQueueEnds<Element>(
       producer: SharedQueueProducer(cell: cell),
@@ -95,7 +113,9 @@ public typealias MPMCQueueEnds<Element: ~Copyable> = QueueEnds<
 /// Minted by `split(.spsc)` / `split(.spmc)`. Releasing the end
 /// (or `finish()`) closes production. There is no `share()` upgrade: the
 /// endpoint shape is fixed at split time.
-public struct QueueProducer<Element: ~Copyable>: ~Copyable, Sendable, QueueProducerProtocol {
+public struct QueueProducer<Element: ~Copyable>: ~Copyable, Sendable,
+  QueueProducerProtocol, SingleProducerProtocol
+{
   public typealias Element = Element
 
   let cell: QueueCell<Element>
@@ -128,7 +148,9 @@ public struct QueueProducer<Element: ~Copyable>: ~Copyable, Sendable, QueueProdu
 ///
 /// Production closes through `close()` or once the last producer reference
 /// is released.
-public final class SharedQueueProducer<Element: ~Copyable>: Sendable, QueueProducerProtocol {
+public final class SharedQueueProducer<Element: ~Copyable>: Sendable,
+  QueueProducerProtocol, MultiProducerProtocol
+{
   public typealias Element = Element
 
   private let cell: QueueCell<Element>
