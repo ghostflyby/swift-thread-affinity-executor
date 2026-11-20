@@ -7,6 +7,7 @@ Thread-affinity executors for Swift Concurrency: every job accepted by one of th
 | Type | Notes | Status |
 | --- | --- | --- |
 | `BlockingQueue` (separate library product) | Split-endpoint blocking FIFO queues (`Queue` unbounded / `BoundedQueue` fixed capacity); endpoint shape fixed at split time — `split(.spsc)` / `.mpsc` / `.spmc` / `.mpmc`; elements cross by ownership transfer (`sending`) | ✅ |
+| `LockFreeMPSCQueue` (in `BlockingQueue`) | Lock-free unbounded MPSC (`split(.mpsc)`); one node per element, atomic enqueue/`tryTake`, condition-parked blocking `take`; exclusive consumer, no `drainAll` | ✅ |
 | `ThreadID` | Cross-platform OS thread ID value type | ✅ |
 | `ThreadBoundExecutor` | `SerialExecutor + TaskExecutor` protocol bound to one OS thread | ✅ |
 | `DedicatedThreadExecutor` | Dedicated `Foundation.Thread` with optional on-thread `initialize`/`finalize` | ✅ |
@@ -113,6 +114,49 @@ Migrating from the previous split API:
   `split(.mpmc)`.
 - `finish()` and `close()` are unchanged.
 
+### Lock-free MPSC
+
+`LockFreeMPSCQueue` is an unbounded multi-producer / single-consumer queue
+backed by an intrusive singly-linked list rather than a lock. Producers
+publish nodes through an atomic tail exchange; the one consumer end advances
+a stub head, moves the element out and frees the node. Elements cross the
+same `consuming sending` / `sending` ownership boundary as in the lock-based
+queue, so they need not be `Sendable`.
+
+```swift
+import BlockingQueue
+
+let ends = LockFreeMPSCQueue<Int>().split(.mpsc)
+let producer = ends.producer
+let consumer = ends.consumer
+
+producer.enqueue(1)  // never waits; the queue is unbounded
+
+let first = consumer.tryTake()  // 1, or nil when currently empty
+producer.close()
+
+while let value = consumer.take() {  // blocks; nil after close + drain
+  print(value)
+}
+```
+
+`tryTake()` is the non-blocking dequeue; its `nil` means "currently empty".
+An empty observation of a closed queue seals it only when no producer is in
+flight; while an in-flight producer exists, `nil` is not terminal and a
+non-blocking drain must continue until `supervisor.isSealed`. `take()` is the
+blocking shutdown path: it parks on a condition variable until an element
+arrives or the terminal state is observed, and a producer takes that condition
+only when a consumer is parked — the data path stays lock-free. `close()`
+racing with `enqueue` is linearized: an element accepted by `enqueue` is
+delivered while a consumer remains, and the queue does not seal around an
+in-flight producer; releasing the consumer end waits for in-flight producers
+before `isSealed` becomes true (an enqueue accepted before the release whose
+link lands after it is stranded, since no taker remains). `split` returns a `sending` bundle: the
+producer and supervisor are `Sendable` and can be shared, while the consumer is
+non-`Sendable` and must stay in the domain it was handed to. The cell
+additionally traps on concurrent consumer entry. The supervisor exposes no
+`drainAll`; drain through the consumer.
+
 ## Build / test
 
 ```bash
@@ -128,6 +172,7 @@ Requires a Swift 6.4+ toolchain. Deployment floors: macOS 15 / iOS 18 / tvOS 18 
 - An executor attached to the main thread via `MainQueueDispatcher` shares the thread with `MainActor` but is not the same executor identity and does not replace it.
 - `MigratingThreadExecutor.migrate(to:)` and `handOver(to:)` require a successor pump whose fixed thread or queue is independent of the currently serving pump — a different wrapper around the same thread or queue still deadlocks. The handshake post queues behind the old serving loop, which exits only after retarget seals its queue, and retarget waits for the handshake. The handshake itself no longer blocks the successor's thread while the old generation drains; the serving loop is posted after the old finalize.
 - `FixedThreadDispatcher.post` returns `false` once the pump stops accepting work. Attachment and migration handshakes surface that as `AttachError.pumpUnavailable` / `MigrationError.pumpUnavailable`; `detach()` returns `false` when the finalize post is rejected instead of blocking forever. A pump that accepts a post but never runs it still leaves the join pending.
+- `LockFreeMPSCQueue` allocates a node plus its element storage per enqueued element and keeps them until the consumer takes it (or the queue is released). A blocking `take()` parks on an `NSCondition`; producers take that lock only when a consumer is parked, so enqueue is lock-free in the common case but a parked consumer adds a mutex-based wake path. Its supervisor has no `drainAll`: the consumer end is exclusive and non-`Sendable`, and a second taker would break the single-consumer head advance. The consumer cell traps on concurrent `take()`/`tryTake()` entry, so a shared holder cannot silently double-free the head.
 
 ## License
 
