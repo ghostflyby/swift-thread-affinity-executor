@@ -21,6 +21,10 @@ concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege by default; the release jobs override with what they need.
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: swift-format
@@ -216,7 +220,7 @@ jobs:
         env:
           TAG: ${{ github.event.release.tag_name }}
         run: |
-          if ! awk '/^## \[Unreleased\]/{flag=1;next} /^## \[/ || /^\[[^]]+\]:/{flag=0} flag' CHANGELOG.md | grep -q '[^[:space:]]'; then
+          if ! awk '/^## \[Unreleased\][[:space:]]*$/{flag=1;next} /^## \[/ || /^\[[^]]+\]:/{flag=0} flag' CHANGELOG.md | grep -q '[^[:space:]]'; then
             echo "CHANGELOG.md has no [Unreleased] entries — nothing to fold"
             exit 0
           fi
@@ -226,28 +230,34 @@ jobs:
             echo "::error::no [Unreleased] compare link at the bottom of CHANGELOG.md"
             exit 1
           fi
-          prev=$(sed -n 's#^\[Unreleased\]: .*/compare/\(.*\)\.\.\.HEAD$#\1#p' CHANGELOG.md | sed -n '1p')
+          prev=$(sed -n 's#^\[Unreleased\]: .*/compare/\(.*\)\.\.\.HEAD[[:space:]]*$#\1#p' CHANGELOG.md | sed -n '1p')
           if [ -n "$prev" ]; then
             version_link="[$TAG]: $base/compare/$prev...$TAG"
           else
             version_link="[$TAG]: $base/releases/tag/$TAG"
           fi
           awk -v tag="$TAG" -v date="$date" -v base="$base" -v vlink="$version_link" '
-            !folded && /^## \[Unreleased\]$/ {
+            !folded && /^## \[Unreleased\][[:space:]]*$/ {
               print; print ""; print "## [" tag "] - " date; folded = 1; next
             }
-            /^\[Unreleased\]: .*\/compare\// {
+            !linkdone && /^\[Unreleased\]: .*\/compare\// {
               print "[Unreleased]: " base "/compare/" tag "...HEAD"
               print vlink
+              linkdone = 1
               next
             }
             { print }
-          ' CHANGELOG.md > CHANGELOG.folded.md
+            END { exit folded ? 0 : 1 }
+          ' CHANGELOG.md > CHANGELOG.folded.md || {
+            echo "::error::changelog fold never matched the [Unreleased] heading — refusing to write a half-folded file"
+            exit 1
+          }
           mv CHANGELOG.folded.md CHANGELOG.md
       - name: Open and merge the fold PR
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
         run: |
           if git diff --quiet; then
             echo "CHANGELOG.md unchanged — nothing to fold"
@@ -262,7 +272,7 @@ jobs:
           git push origin "$branch"
           gh pr create --base main --head "$branch" \
             --title "chore(changelog): fold Unreleased into $TAG" \
-            --body "Automated changelog fold for release [$TAG](https://github.com/ghostflyby/swift-thread-affinity-executor/releases/tag/$TAG)."
+            --body "Automated changelog fold for release [$TAG](https://github.com/$REPO/releases/tag/$TAG)."
           for attempt in 1 2 3; do
             if gh pr merge "$branch" --squash --delete-branch; then
               echo "Fold PR merged"
