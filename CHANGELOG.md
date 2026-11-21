@@ -8,6 +8,12 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- Release automation: the changelog fold for a published release now lands
+  through a pull request, satisfying the repository rule that requires PRs
+  for `main`; the previous direct push was rejected. No library changes.
+
 ## [0.1.0] - 2026-11-21
 
 ### Added
