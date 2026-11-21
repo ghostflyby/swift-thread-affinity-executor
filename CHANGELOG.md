@@ -8,6 +8,13 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- Release automation: the changelog fold is now an in-repo transform with
+  Keep a Changelog's own link conventions; the third-party action enforced
+  a private link format and failed on our first-release links. No library
+  changes.
+
 ## [0.1.1] - 2026-11-21
 
 ### Fixed
