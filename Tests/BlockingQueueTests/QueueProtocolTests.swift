@@ -157,10 +157,11 @@ private func blockingEnqueue<P: BlockingQueueProducerProtocol & ~Copyable>(
 }
 
 private func tryTake<C: TryQueueConsumerProtocol & ~Copyable>(
-  _ consumer: borrowing C
+  _ consumer: borrowing C,
+  expecting expected: Int = 1
 ) where C.Element == Int {
   let value = consumer.tryTake()
-  #expect(value == 1)
+  #expect(value == expected)
 }
 
 @Test func optionalEndpointCapabilitiesAreUsableThroughProtocols() {
@@ -168,11 +169,50 @@ private func tryTake<C: TryQueueConsumerProtocol & ~Copyable>(
   blockingEnqueue(bounded.producer)
   release(bounded.consumer)
 
+  let unbounded = UnboundedQueue<Int>().split(.mpsc)
+  blockingEnqueue(unbounded.producer)
+  release(unbounded.consumer)
+
   let lockFree = LinkedQueue<Int>().split(.mpsc)
   let accepted = lockFree.producer.enqueue(1)
   #expect(accepted)
   tryTake(lockFree.consumer)
   release(lockFree.consumer)
+}
+
+@Test func blockingConsumersShareTryTake() {
+  let exclusive = BoundedQueue<Int>(capacity: 2).split(.spsc)
+  let accepted = exclusive.producer.enqueue(1)
+  #expect(accepted)
+  tryTake(exclusive.consumer)
+  release(exclusive.consumer)
+
+  let shared = UnboundedQueue<Int>().split(.mpmc)
+  #expect(shared.producer.enqueue(1))
+  tryTake(shared.consumer)
+  release(shared.consumer)
+}
+
+@Test func blockingTryTakeReportsEmptyWithoutSealing() {
+  let ends = UnboundedQueue<Int>().split(.spsc)
+  let empty = ends.consumer.tryTake()
+  #expect(empty == nil)
+  #expect(ends.supervisor.isSealed == false)
+
+  let accepted = ends.producer.enqueue(1)
+  #expect(accepted)
+  tryTake(ends.consumer)
+  release(ends.consumer)
+}
+
+@Test func blockingTryTakeSealsClosedDrainedQueue() {
+  let ends = BoundedQueue<Int>(capacity: 1).split(.mpsc)
+  ends.producer.close()
+
+  let empty = ends.consumer.tryTake()
+  #expect(empty == nil)
+  #expect(ends.supervisor.isSealed)
+  release(ends.consumer)
 }
 
 @Test func categoryProtocolsAcceptNonCopyableElements() {

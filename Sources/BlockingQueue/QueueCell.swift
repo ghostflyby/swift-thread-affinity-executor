@@ -128,6 +128,25 @@ final class QueueCell<Element: ~Copyable>: @unchecked Sendable {
     return nil
   }
 
+  /// Non-blocking take: `nil` means the queue is currently empty. An empty
+  /// observation of a closed queue seals it, as in `take()`.
+  func tryTake() -> sending Element? {
+    condition.lock()
+    if let element = elements.popFirst() {
+      if capacity != nil {
+        apply(producerWakeLocked())
+      }
+      condition.unlock()
+      return element
+    }
+    if closed && !sealed {
+      sealed = true
+      condition.broadcast()
+    }
+    condition.unlock()
+    return nil
+  }
+
   func close() {
     condition.lock()
     closed = true

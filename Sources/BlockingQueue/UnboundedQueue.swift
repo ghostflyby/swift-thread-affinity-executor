@@ -114,7 +114,7 @@ public typealias MPMCQueueEnds<Element: ~Copyable> = QueueEnds<
 /// (or `finish()`) closes production. There is no `share()` upgrade: the
 /// endpoint shape is fixed at split time.
 public struct QueueProducer<Element: ~Copyable>: ~Copyable, Sendable,
-  QueueProducerProtocol, SingleProducerProtocol
+  QueueProducerProtocol, BlockingQueueProducerProtocol, SingleProducerProtocol
 {
   public typealias Element = Element
 
@@ -130,6 +130,17 @@ public struct QueueProducer<Element: ~Copyable>: ~Copyable, Sendable,
   @discardableResult
   public func enqueue(_ element: consuming sending Element) -> Bool {
     cell.enqueue(element)
+  }
+
+  /// Appends `element`, waiting only while a bounded queue is full; this
+  /// queue is unbounded, so the call never waits.
+  ///
+  /// Returns `false` (discarding `element`) once production is closed or no
+  /// consumer end remains.
+  @available(*, noasync)
+  @discardableResult
+  public func enqueueBlocking(_ element: consuming sending Element) -> Bool {
+    cell.enqueueBlocking(element)
   }
 
   /// Closes production and releases this end. Remaining elements stay
@@ -149,7 +160,7 @@ public struct QueueProducer<Element: ~Copyable>: ~Copyable, Sendable,
 /// Production closes through `close()` or once the last producer reference
 /// is released.
 public final class SharedQueueProducer<Element: ~Copyable>: Sendable,
-  QueueProducerProtocol, MultiProducerProtocol
+  QueueProducerProtocol, BlockingQueueProducerProtocol, MultiProducerProtocol
 {
   public typealias Element = Element
 
@@ -174,6 +185,17 @@ public final class SharedQueueProducer<Element: ~Copyable>: Sendable,
   @discardableResult
   public func enqueue(_ element: consuming sending Element) -> Bool {
     cell.enqueue(element)
+  }
+
+  /// Appends `element`, waiting only while a bounded queue is full; this
+  /// queue is unbounded, so the call never waits.
+  ///
+  /// Returns `false` (discarding `element`) once production is closed or no
+  /// consumer end remains.
+  @available(*, noasync)
+  @discardableResult
+  public func enqueueBlocking(_ element: consuming sending Element) -> Bool {
+    cell.enqueueBlocking(element)
   }
 
   /// Closes production. Remaining elements stay available to consumers.
