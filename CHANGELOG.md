@@ -8,6 +8,14 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- Release automation: the changelog fold for a published release now lands
+  through a pull request, satisfying the repository rule that requires PRs
+  for `main`; the previous direct push was rejected. No library changes.
+
+## [0.1.0] - 2026-11-21
+
 ### Added
 
 - `ThreadAffinityExecutor` library: `ThreadID` (cross-platform OS thread
@@ -35,3 +43,4 @@ and this project adheres to
   (see README).
 
 [Unreleased]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.0...HEAD
+[0.1.0]: https://github.com/ghostflyby/swift-thread-affinity-executor/releases/tag/0.1.0
