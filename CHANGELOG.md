@@ -8,6 +8,8 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-21
+
 ### Fixed
 
 - Release automation: the changelog fold is now an in-repo transform with
@@ -43,6 +45,7 @@ and this project adheres to
 - Ownership-transfer elements: queue elements need not be `Sendable` and may
   be `~Copyable`; the handoff is compiler-checked (`sending`).
 
-[Unreleased]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.1...HEAD
+[Unreleased]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.2...HEAD
+[0.1.2]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.1...0.1.2
 [0.1.1]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/ghostflyby/swift-thread-affinity-executor/releases/tag/0.1.0
