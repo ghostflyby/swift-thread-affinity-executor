@@ -59,8 +59,18 @@ jobs:
         env:
           TSAN_OPTIONS: symbolize=0
         run: swift build -c debug --sanitize=thread
-      - name: Test (ThreadSanitizer)
-        if: matrix.config == 'debug'
+      # Linux TSan cannot see Synchronization.Mutex's slow-path acquire
+      # (swiftlang/swift#94511). Suppress the known false-positive frames
+      # until the toolchain carries swiftlang/swift#94425.
+      - name: Test (ThreadSanitizer, Linux)
+        if: matrix.config == 'debug' && runner.os == 'Linux'
+        run: |
+          swift_bin=$(readlink -f "$(command -v swift)")
+          toolchain_bin=$(dirname "$swift_bin")
+          export TSAN_OPTIONS="symbolize=1:external_symbolizer_path=$toolchain_bin/llvm-symbolizer:suppressions=$GITHUB_WORKSPACE/.github/tsan-suppressions.txt"
+          swift test -c debug --sanitize=thread
+      - name: Test (ThreadSanitizer, macOS)
+        if: matrix.config == 'debug' && runner.os != 'Linux'
         env:
           TSAN_OPTIONS: symbolize=0
         run: swift test -c debug --sanitize=thread
