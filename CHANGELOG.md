@@ -10,6 +10,15 @@ and this project adheres to
 
 ### Fixed
 
+- Release automation: the changelog fold is now an in-repo transform with
+  Keep a Changelog's own link conventions; the third-party action enforced
+  a private link format and failed on our first-release links. No library
+  changes.
+
+## [0.1.1] - 2026-11-21
+
+### Fixed
+
 - Release automation: the changelog fold for a published release now lands
   through a pull request, satisfying the repository rule that requires PRs
   for `main`; the previous direct push was rejected. No library changes.
@@ -42,5 +51,6 @@ and this project adheres to
 - Executors impose a quiescence contract before `shutdown()` / `detach()`
   (see README).
 
-[Unreleased]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.0...HEAD
+[Unreleased]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.1...HEAD
+[0.1.1]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/ghostflyby/swift-thread-affinity-executor/releases/tag/0.1.0
