@@ -3,16 +3,28 @@ name: CI
 on:
   push:
     branches: [main]
+    # Bare semver tags. The pattern doubles as a naming guard: any other tag
+    # shape (e.g. experiments) triggers nothing.
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
   pull_request:
   workflow_dispatch:
+  # Tag deletion and release publication drive the release jobs below. The
+  # four build/test jobs are gated off these events.
+  delete:
+  release:
+    types: [published]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Keyed on the event name as well: `delete` and `release` events report the
+  # default branch in `github.ref` and must neither cancel nor be cancelled
+  # by in-flight branch CI.
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   lint:
     name: swift-format
+    if: github.event_name != 'delete' && github.event_name != 'release'
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
@@ -24,6 +36,7 @@ jobs:
 
   test:
     name: ${{ matrix.os }} · ${{ matrix.config }}
+    if: github.event_name != 'delete' && github.event_name != 'release'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     # macOS needs the xcode-27 image: Xcode 26.x ships Swift 6.3 and cannot
@@ -87,6 +100,7 @@ jobs:
   # blocking.
   windows:
     name: windows-2022
+    if: github.event_name != 'delete' && github.event_name != 'release'
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
@@ -105,6 +119,7 @@ jobs:
 
   apple-platforms:
     name: ${{ matrix.destination }}
+    if: github.event_name != 'delete' && github.event_name != 'release'
     # Xcode 27 is the first Xcode with the Swift 6.4 toolchain.
     runs-on: xcode-27
     timeout-minutes: 30
@@ -123,3 +138,83 @@ jobs:
           xcodebuild -scheme ThreadAffinityExecutor
           -destination "${{ matrix.destination }}"
           -quiet build
+
+  # Release mechanics. Changelog entries are written by hand in
+  # `## [Unreleased]`; these jobs only handle the mechanics:
+  # a semver tag publishes the Unreleased section as a draft release note,
+  # deleting such a tag removes the draft, and publishing the draft folds
+  # the Unreleased section into a version heading in CHANGELOG.md.
+
+  draft-release:
+    name: draft release (${{ github.ref_name }})
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: [lint, test, windows, apple-platforms]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Extract Unreleased section from CHANGELOG.md
+        run: |
+          awk '/^## \[Unreleased\]/{flag=1;next} /^## \[/ || /^\[[^]]+\]:/{flag=0} flag' CHANGELOG.md > "$RUNNER_TEMP/unreleased.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/unreleased.md"; then
+            echo "::error::CHANGELOG.md has no entries under [Unreleased] — write them before tagging."
+            exit 1
+          fi
+      - name: Create draft release with Unreleased notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --draft --title "$TAG" --notes-file "$RUNNER_TEMP/unreleased.md"
+
+  remove-draft-release:
+    name: remove draft release (${{ github.event.ref }})
+    if: github.event_name == 'delete' && github.event.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      # Only a draft whose tag is gone is removed; published releases are
+      # left in place.
+      - name: Remove draft release for deleted tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.ref }}
+        run: |
+          if gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null | grep -q true; then
+            gh release delete "$TAG" --yes
+            echo "Removed draft release $TAG"
+          else
+            echo "No draft release for $TAG — nothing to do"
+          fi
+
+  fold-changelog:
+    name: fold changelog (${{ github.event.release.tag_name }})
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - name: Fold Unreleased into ${{ github.event.release.tag_name }}
+        uses: thomaseizinger/keep-a-changelog-new-release@v2
+        with:
+          tag: ${{ github.event.release.tag_name }}
+      - name: Commit folded changelog
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo "CHANGELOG.md unchanged — nothing to fold"
+            exit 0
+          fi
+          git commit -m "chore(changelog): fold Unreleased into $TAG"
+          git push origin HEAD:main
