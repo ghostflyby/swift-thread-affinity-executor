@@ -174,14 +174,13 @@ private enum CompileCheckError: Error {
     )
   }
 
-  /// The `sending` return of `take()` and `drainAll()` must be usable as a
-  /// `sending` result; otherwise callers cannot move the value to another
+  /// The `sending` return of `take()` must be usable as a `sending`
+  /// result; otherwise callers cannot move the value to another
   /// isolation domain. Removing `sending` from those declarations fails this
   /// compile with a `sending ... risks causing data races` diagnostic.
   private func expectSendingResults(products: String, swiftc: String) throws {
     let source = """
       import BlockingQueue
-      import DequeModule
 
       final class Payload {
         var v = 0
@@ -207,10 +206,6 @@ private enum CompileCheckError: Error {
         consumer.tryTake()
       }
 
-      func drain(_ supervisor: QueueSupervisor<Payload>) -> sending UniqueDeque<Payload> {
-        supervisor.drainAll()
-      }
-
       func pullLockFree(_ consumer: borrowing LinkedQueueConsumer<Payload>) -> sending Payload? {
         consumer.take()
       }
@@ -225,7 +220,7 @@ private enum CompileCheckError: Error {
     let result = try compile(source, products: products, swiftc: swiftc)
     #expect(
       result.status == 0,
-      "take()/drainAll() must return sending values — got:\n\(result.diagnostics)"
+      "take() must return sending values — got:\n\(result.diagnostics)"
     )
   }
 
@@ -246,10 +241,10 @@ private enum CompileCheckError: Error {
     }
 
     let producerChecks: [(type: String, method: String)] = [
-      ("QueueProducer", "enqueue"),
-      ("QueueProducer", "enqueueBlocking"),
-      ("SharedQueueProducer", "enqueue"),
-      ("SharedQueueProducer", "enqueueBlocking"),
+      ("UnboundedQueueProducer", "enqueue"),
+      ("UnboundedQueueProducer", "enqueueBlocking"),
+      ("SharedUnboundedQueueProducer", "enqueue"),
+      ("SharedUnboundedQueueProducer", "enqueueBlocking"),
       ("BoundedQueueProducer", "enqueue"),
       ("BoundedQueueProducer", "enqueueBlocking"),
       ("SharedBoundedQueueProducer", "enqueue"),

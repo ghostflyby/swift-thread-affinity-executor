@@ -4,7 +4,6 @@
 //
 
 import BlockingQueue
-import DequeModule
 import Foundation
 import Testing
 
@@ -341,7 +340,7 @@ import Testing
   release(ends.consumer)
 }
 
-@Test func drainAllUnblocksWaitingProducer() {
+@Test func consumerTakeUnblocksWaitingProducer() {
   let ends = BoundedQueue<Int>(capacity: 1).split(.spsc)
   let producer = ends.producer
   let consumer = ends.consumer
@@ -359,9 +358,9 @@ import Testing
   thread.start()
   waitForWaiters(supervisor, producers: 1)
 
-  // draining frees the slot and wakes the blocked producer
-  var drained = supervisor.drainAll()
-  #expect(drained.popFirst() == 1)
+  // taking frees the slot and wakes the blocked producer
+  let freed = consumer.take()
+  #expect(freed == 1)
 
   done.wait()
   #expect(result.get() == true)

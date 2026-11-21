@@ -3,12 +3,10 @@
 //  BlockingQueue
 //
 
-import DequeModule
-
 /// Non-minting control handle over a split queue: closes production, awaits
-/// the terminal state, inspects and drains. Cannot create ends.
+/// the terminal state and inspects. Cannot create ends.
 public final class QueueSupervisor<Element: ~Copyable>: Sendable, QueueLifecycleProtocol,
-  QueueInspectionProtocol, QueueDrainProtocol
+  QueueInspectionProtocol
 {
   public typealias Element = Element
 
@@ -43,10 +41,5 @@ public final class QueueSupervisor<Element: ~Copyable>: Sendable, QueueLifecycle
   @available(*, noasync)
   public func waitUntilSealed() {
     cell.waitUntilSealed()
-  }
-
-  /// Removes and returns everything currently queued, in order.
-  public func drainAll() -> sending UniqueDeque<Element> {
-    cell.drainAll()
   }
 }

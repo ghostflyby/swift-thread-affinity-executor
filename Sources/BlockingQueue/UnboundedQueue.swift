@@ -21,19 +21,19 @@
 public struct UnboundedQueue<Element: ~Copyable>: ~Copyable, Sendable, MPMCQueueProtocol {
   public typealias Element = Element
 
-  public typealias SPSCProducer = QueueProducer<Element>
+  public typealias SPSCProducer = UnboundedQueueProducer<Element>
   public typealias SPSCConsumer = QueueConsumer<Element>
   public typealias SPSCSupervisor = QueueSupervisor<Element>
 
-  public typealias MPSCProducer = SharedQueueProducer<Element>
+  public typealias MPSCProducer = SharedUnboundedQueueProducer<Element>
   public typealias MPSCConsumer = QueueConsumer<Element>
   public typealias MPSCSupervisor = QueueSupervisor<Element>
 
-  public typealias SPMCProducer = QueueProducer<Element>
+  public typealias SPMCProducer = UnboundedQueueProducer<Element>
   public typealias SPMCConsumer = SharedQueueConsumer<Element>
   public typealias SPMCSupervisor = QueueSupervisor<Element>
 
-  public typealias MPMCProducer = SharedQueueProducer<Element>
+  public typealias MPMCProducer = SharedUnboundedQueueProducer<Element>
   public typealias MPMCConsumer = SharedQueueConsumer<Element>
   public typealias MPMCSupervisor = QueueSupervisor<Element>
 
@@ -45,10 +45,10 @@ public struct UnboundedQueue<Element: ~Copyable>: ~Copyable, Sendable, MPMCQueue
 
   /// Splits the queue into one exclusive producer end, one exclusive
   /// consumer end and a supervisor — SPSC. Consumes the token.
-  public consuming func split(_ option: SPSCOption) -> sending SPSCQueueEnds<Element> {
+  public consuming func split(_ option: SPSCOption) -> sending UnboundedSPSCQueueEnds<Element> {
     cell.registerEnds()
-    return SPSCQueueEnds<Element>(
-      producer: QueueProducer(cell: cell),
+    return UnboundedSPSCQueueEnds<Element>(
+      producer: UnboundedQueueProducer(cell: cell),
       consumer: QueueConsumer(cell: cell),
       supervisor: QueueSupervisor(cell: cell)
     )
@@ -56,10 +56,10 @@ public struct UnboundedQueue<Element: ~Copyable>: ~Copyable, Sendable, MPMCQueue
 
   /// Splits the queue into a cloneable producer end, one exclusive consumer
   /// end and a supervisor — MPSC. Consumes the token.
-  public consuming func split(_ option: MPSCOption) -> sending MPSCQueueEnds<Element> {
+  public consuming func split(_ option: MPSCOption) -> sending UnboundedMPSCQueueEnds<Element> {
     cell.registerEnds()
-    return MPSCQueueEnds<Element>(
-      producer: SharedQueueProducer(cell: cell),
+    return UnboundedMPSCQueueEnds<Element>(
+      producer: SharedUnboundedQueueProducer(cell: cell),
       consumer: QueueConsumer(cell: cell),
       supervisor: QueueSupervisor(cell: cell)
     )
@@ -67,10 +67,10 @@ public struct UnboundedQueue<Element: ~Copyable>: ~Copyable, Sendable, MPMCQueue
 
   /// Splits the queue into one exclusive producer end, a cloneable consumer
   /// end and a supervisor — SPMC. Consumes the token.
-  public consuming func split(_ option: SPMCOption) -> sending SPMCQueueEnds<Element> {
+  public consuming func split(_ option: SPMCOption) -> sending UnboundedSPMCQueueEnds<Element> {
     cell.registerEnds()
-    return SPMCQueueEnds<Element>(
-      producer: QueueProducer(cell: cell),
+    return UnboundedSPMCQueueEnds<Element>(
+      producer: UnboundedQueueProducer(cell: cell),
       consumer: SharedQueueConsumer(cell: cell),
       supervisor: QueueSupervisor(cell: cell)
     )
@@ -78,10 +78,10 @@ public struct UnboundedQueue<Element: ~Copyable>: ~Copyable, Sendable, MPMCQueue
 
   /// Splits the queue into a cloneable producer end, a cloneable consumer
   /// end and a supervisor — MPMC. Consumes the token.
-  public consuming func split(_ option: MPMCOption) -> sending MPMCQueueEnds<Element> {
+  public consuming func split(_ option: MPMCOption) -> sending UnboundedMPMCQueueEnds<Element> {
     cell.registerEnds()
-    return MPMCQueueEnds<Element>(
-      producer: SharedQueueProducer(cell: cell),
+    return UnboundedMPMCQueueEnds<Element>(
+      producer: SharedUnboundedQueueProducer(cell: cell),
       consumer: SharedQueueConsumer(cell: cell),
       supervisor: QueueSupervisor(cell: cell)
     )
@@ -89,23 +89,23 @@ public struct UnboundedQueue<Element: ~Copyable>: ~Copyable, Sendable, MPMCQueue
 }
 
 /// The capabilities handed out by `UnboundedQueue.split(.spsc)`: move-only.
-public typealias SPSCQueueEnds<Element: ~Copyable> = QueueEnds<
-  QueueProducer<Element>, QueueConsumer<Element>, QueueSupervisor<Element>
+public typealias UnboundedSPSCQueueEnds<Element: ~Copyable> = QueueEnds<
+  UnboundedQueueProducer<Element>, QueueConsumer<Element>, QueueSupervisor<Element>
 >
 
 /// The capabilities handed out by `UnboundedQueue.split(.mpsc)`: move-only.
-public typealias MPSCQueueEnds<Element: ~Copyable> = QueueEnds<
-  SharedQueueProducer<Element>, QueueConsumer<Element>, QueueSupervisor<Element>
+public typealias UnboundedMPSCQueueEnds<Element: ~Copyable> = QueueEnds<
+  SharedUnboundedQueueProducer<Element>, QueueConsumer<Element>, QueueSupervisor<Element>
 >
 
 /// The capabilities handed out by `UnboundedQueue.split(.spmc)`: move-only.
-public typealias SPMCQueueEnds<Element: ~Copyable> = QueueEnds<
-  QueueProducer<Element>, SharedQueueConsumer<Element>, QueueSupervisor<Element>
+public typealias UnboundedSPMCQueueEnds<Element: ~Copyable> = QueueEnds<
+  UnboundedQueueProducer<Element>, SharedQueueConsumer<Element>, QueueSupervisor<Element>
 >
 
 /// The capabilities handed out by `UnboundedQueue.split(.mpmc)`: move-only.
-public typealias MPMCQueueEnds<Element: ~Copyable> = QueueEnds<
-  SharedQueueProducer<Element>, SharedQueueConsumer<Element>, QueueSupervisor<Element>
+public typealias UnboundedMPMCQueueEnds<Element: ~Copyable> = QueueEnds<
+  SharedUnboundedQueueProducer<Element>, SharedQueueConsumer<Element>, QueueSupervisor<Element>
 >
 
 /// Single, move-only producer end of an unbounded queue.
@@ -113,7 +113,7 @@ public typealias MPMCQueueEnds<Element: ~Copyable> = QueueEnds<
 /// Minted by `split(.spsc)` / `split(.spmc)`. Releasing the end
 /// (or `finish()`) closes production. There is no `share()` upgrade: the
 /// endpoint shape is fixed at split time.
-public struct QueueProducer<Element: ~Copyable>: ~Copyable, Sendable,
+public struct UnboundedQueueProducer<Element: ~Copyable>: ~Copyable, Sendable,
   QueueProducerProtocol, BlockingQueueProducerProtocol, SingleProducerProtocol
 {
   public typealias Element = Element
@@ -159,7 +159,7 @@ public struct QueueProducer<Element: ~Copyable>: ~Copyable, Sendable,
 ///
 /// Production closes through `close()` or once the last producer reference
 /// is released.
-public final class SharedQueueProducer<Element: ~Copyable>: Sendable,
+public final class SharedUnboundedQueueProducer<Element: ~Copyable>: Sendable,
   QueueProducerProtocol, BlockingQueueProducerProtocol, MultiProducerProtocol
 {
   public typealias Element = Element

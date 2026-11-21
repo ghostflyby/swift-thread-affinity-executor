@@ -47,15 +47,6 @@ extension ThreadBoundExecutor {
     threadID == ThreadID.current
   }
 
-  /// Fallback isolation check for runtimes without
-  /// `isIsolatingCurrentContext()`.
-  public func checkIsolated() {
-    precondition(
-      threadID == ThreadID.current,
-      "Incorrect actor isolation: expected \(threadID), got \(ThreadID.current)"
-    )
-  }
-
   /// Runs a job on the calling thread. The executor's scheduling already
   /// guarantees the calling thread is the bound thread.
   func runJob(_ job: consuming UnownedJob) {
