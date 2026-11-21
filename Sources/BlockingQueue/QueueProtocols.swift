@@ -16,7 +16,8 @@ public protocol QueueProducerProtocol<Element>: ~Copyable, Sendable {
   func enqueue(_ element: consuming sending Element) -> Bool
 }
 
-/// Enqueue that waits while a bounded queue is full.
+/// Enqueue that waits while the queue is full; an unbounded queue never
+/// waits.
 public protocol BlockingQueueProducerProtocol<Element>: ~Copyable, QueueProducerProtocol
 where Element: ~Copyable {
   @available(*, noasync)
@@ -33,7 +34,10 @@ public protocol QueueConsumerProtocol<Element>: ~Copyable {
   func take() -> sending Element?
 }
 
-/// Non-blocking dequeue capability, added where the implementation supports it.
+/// Non-blocking dequeue capability; `nil` means the queue is currently empty.
+///
+/// An empty observation does not by itself mean production is finished; the
+/// concrete consumer documents when the queue becomes terminal.
 public protocol TryQueueConsumerProtocol<Element>: ~Copyable, QueueConsumerProtocol
 where Element: ~Copyable {
   @discardableResult

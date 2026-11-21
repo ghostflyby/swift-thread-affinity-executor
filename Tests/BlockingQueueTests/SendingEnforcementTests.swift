@@ -195,6 +195,18 @@ private enum CompileCheckError: Error {
         consumer.take()
       }
 
+      func tryPullUnique(
+        _ consumer: borrowing QueueConsumer<Payload>
+      ) -> sending Payload? {
+        consumer.tryTake()
+      }
+
+      func tryPullShared(
+        _ consumer: SharedQueueConsumer<Payload>
+      ) -> sending Payload? {
+        consumer.tryTake()
+      }
+
       func drain(_ supervisor: QueueSupervisor<Payload>) -> sending UniqueDeque<Payload> {
         supervisor.drainAll()
       }
@@ -235,7 +247,9 @@ private enum CompileCheckError: Error {
 
     let producerChecks: [(type: String, method: String)] = [
       ("QueueProducer", "enqueue"),
+      ("QueueProducer", "enqueueBlocking"),
       ("SharedQueueProducer", "enqueue"),
+      ("SharedQueueProducer", "enqueueBlocking"),
       ("BoundedQueueProducer", "enqueue"),
       ("BoundedQueueProducer", "enqueueBlocking"),
       ("SharedBoundedQueueProducer", "enqueue"),

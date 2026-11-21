@@ -10,7 +10,7 @@
 /// seals the queue from the consumer side. There is no `share()` upgrade:
 /// the endpoint shape is fixed at split time.
 public struct QueueConsumer<Element: ~Copyable>: ~Copyable, Sendable,
-  QueueConsumerProtocol, SingleConsumerProtocol
+  QueueConsumerProtocol, TryQueueConsumerProtocol, SingleConsumerProtocol
 {
   public typealias Element = Element
 
@@ -26,6 +26,14 @@ public struct QueueConsumer<Element: ~Copyable>: ~Copyable, Sendable,
     cell.take()
   }
 
+  /// Removes and returns the front element, or `nil` when the queue is
+  /// currently empty. Never waits; an empty observation of a closed queue
+  /// seals it.
+  @discardableResult
+  public func tryTake() -> sending Element? {
+    cell.tryTake()
+  }
+
   deinit {
     cell.removeConsumer()
   }
@@ -37,7 +45,7 @@ public struct QueueConsumer<Element: ~Copyable>: ~Copyable, Sendable,
 ///
 /// Releasing the last reference seals the queue from the consumer side.
 public final class SharedQueueConsumer<Element: ~Copyable>: Sendable,
-  QueueConsumerProtocol, MultiConsumerProtocol
+  QueueConsumerProtocol, TryQueueConsumerProtocol, MultiConsumerProtocol
 {
   public typealias Element = Element
 
@@ -60,5 +68,13 @@ public final class SharedQueueConsumer<Element: ~Copyable>: Sendable,
   @available(*, noasync)
   public func take() -> sending Element? {
     cell.take()
+  }
+
+  /// Removes and returns the front element, or `nil` when the queue is
+  /// currently empty. Never waits; an empty observation of a closed queue
+  /// seals it.
+  @discardableResult
+  public func tryTake() -> sending Element? {
+    cell.tryTake()
   }
 }

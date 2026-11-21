@@ -206,6 +206,55 @@ import Testing
   #expect(ends.supervisor.isSealed)
 }
 
+@Test func boundedSPMCTryTakeWakesBlockedProducer() {
+  let ends = BoundedQueue<Int>(capacity: 1).split(.spmc)
+  let producer = ends.producer
+  let consumer = ends.consumer
+
+  let initial = producer.enqueue(1)
+  #expect(initial)
+
+  let result = Box<Bool?>(nil)
+  let done = DispatchSemaphore(value: 0)
+  let thread = Thread {
+    result.set(producer.enqueueBlocking(2))
+    done.signal()
+  }
+  thread.start()
+  waitForWaiters(ends.supervisor, producers: 1)
+
+  let first = consumer.tryTake()
+  #expect(first == 1)
+  #expect(done.wait(timeout: .now() + 2) == .success)
+  #expect(result.get() == true)
+  let second = consumer.tryTake()
+  #expect(second == 2)
+
+  ends.supervisor.close()
+  let drained = consumer.tryTake()
+  #expect(drained == nil)
+  #expect(ends.supervisor.isSealed)
+}
+
+@Test func tryTakeSealWakesSealedWaiter() {
+  let ends = BoundedQueue<Int>(capacity: 1).split(.mpmc)
+  let supervisor = ends.supervisor
+  supervisor.close()
+
+  let sealed = DispatchSemaphore(value: 0)
+  let waiter = Thread {
+    supervisor.waitUntilSealed()
+    sealed.signal()
+  }
+  waiter.start()
+  waitForWaiters(supervisor, sealed: 1)
+
+  let drained = ends.consumer.tryTake()
+  #expect(drained == nil)
+  #expect(sealed.wait(timeout: .now() + 2) == .success)
+  #expect(supervisor.isSealed)
+}
+
 @Test func blockedEnqueueWakesOnClose() {
   let ends = BoundedQueue<Int>(capacity: 1).split(.spsc)
   let producer = ends.producer
