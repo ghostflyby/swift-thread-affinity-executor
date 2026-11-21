@@ -73,6 +73,22 @@ private func waitForParkedConsumer<Element: ~Copyable>(
   release(consumer)
 }
 
+/// The exclusive SPSC producer end closes production through the consuming
+/// `finish()` and is consumed by the call; remaining elements still drain.
+@Test func lockFreeSPSCSplitFinishClosesProduction() {
+  let ends = LinkedQueue<Int>().split(.spsc)
+  let accepted = ends.producer.enqueue(1)
+  #expect(accepted)
+  ends.producer.finish()
+
+  let first = ends.consumer.take()
+  #expect(first == 1)
+  let drained = ends.consumer.take()
+  #expect(drained == nil)
+  #expect(ends.supervisor.isSealed)
+  release(ends.consumer)
+}
+
 @Test func lockFreeConsumerReleaseFailsEnqueueAndSeals() {
   let ends = LinkedQueue<Int>().split(.mpsc)
   let producer = ends.producer

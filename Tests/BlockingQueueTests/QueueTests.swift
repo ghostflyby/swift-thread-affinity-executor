@@ -4,7 +4,6 @@
 //
 
 import BlockingQueue
-import DequeModule
 import Foundation
 import Testing
 
@@ -192,26 +191,6 @@ import Testing
   let accepted = ends.producer.enqueue(1)
   #expect(accepted == false)
   release(ends.producer)
-}
-
-@Test func supervisorDrainAllTakesEverythingInOrder() {
-  let ends = UnboundedQueue<Int>().split(.spsc)
-  ends.producer.enqueue(1)
-  ends.producer.enqueue(2)
-  ends.producer.enqueue(3)
-
-  var drained = ends.supervisor.drainAll()
-  #expect(drained.count == 3)
-  #expect(ends.supervisor.count == 0)
-
-  var received: [Int] = []
-  while let element = drained.popFirst() {
-    received.append(element)
-  }
-  #expect(received == [1, 2, 3])
-
-  release(ends.producer)
-  release(ends.consumer)
 }
 
 @Test func waitUntilSealedReturnsAfterConsumerDrains() async {

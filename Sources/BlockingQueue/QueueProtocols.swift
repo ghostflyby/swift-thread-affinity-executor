@@ -6,8 +6,6 @@
 //  the generic ends bundle that composes them.
 //
 
-import DequeModule
-
 /// Non-blocking enqueue capability.
 public protocol QueueProducerProtocol<Element>: ~Copyable, Sendable {
   associatedtype Element: ~Copyable
@@ -30,7 +28,6 @@ public protocol QueueConsumerProtocol<Element>: ~Copyable {
   associatedtype Element: ~Copyable
 
   @available(*, noasync)
-  @discardableResult
   func take() -> sending Element?
 }
 
@@ -60,18 +57,10 @@ public protocol QueueInspectionProtocol<Element>: Sendable {
   var count: Int { get }
 }
 
-/// Supervisor-side drain, available only when the implementation can hand the
-/// queued elements to a second taker.
-public protocol QueueDrainProtocol<Element>: Sendable {
-  associatedtype Element: ~Copyable
-  func drainAll() -> sending UniqueDeque<Element>
-}
-
 /// The producer/consumer/supervisor triple handed out by every split.
 ///
 /// `Element` is shared by all three. The supervisor provides lifecycle and
-/// inspection; draining remains an optional capability (`QueueDrainProtocol`)
-/// because the lock-free consumer end is exclusive.
+/// inspection.
 @frozen
 public struct QueueEnds<
   P: QueueProducerProtocol & ~Copyable,

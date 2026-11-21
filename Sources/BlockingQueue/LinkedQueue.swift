@@ -117,8 +117,9 @@ public struct LinkedQueueExclusiveProducer<Element: ~Copyable>: ~Copyable,
     producer.enqueue(element)
   }
 
-  /// Closes production. Remaining elements stay available to consumers.
-  public func close() {
+  /// Closes production and releases this end. Remaining elements stay
+  /// available to consumers.
+  public consuming func finish() {
     producer.close()
   }
 }
@@ -206,7 +207,6 @@ public struct LinkedQueueConsumer<Element: ~Copyable>: ~Copyable,
   /// Returns `nil` once the queue is closed and fully drained; that
   /// observation seals the queue.
   @available(*, noasync)
-  @discardableResult
   public func take() -> sending Element? {
     cell.take()
   }
@@ -214,10 +214,6 @@ public struct LinkedQueueConsumer<Element: ~Copyable>: ~Copyable,
 
 /// Non-minting control handle over a split lock-free MPSC queue: closes
 /// production, awaits the terminal state and inspects. Cannot create ends.
-///
-/// There is deliberately no `drainAll`: the consumer end is exclusive, so a
-/// drain from the control handle would introduce a second taker and break
-/// the single-consumer algorithm. Drain through the consumer instead.
 public final class LinkedQueueSupervisor<Element: ~Copyable>: Sendable,
   QueueLifecycleProtocol, QueueInspectionProtocol
 {

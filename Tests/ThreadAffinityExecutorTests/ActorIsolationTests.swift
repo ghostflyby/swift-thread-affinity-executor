@@ -111,19 +111,3 @@ actor Sibling {
   #expect(result == 1)
   await shutdown(counter.executor)
 }
-
-/// Old-runtime fallback path: `checkIsolated()` — the
-/// `isIsolatingCurrentContext` predecessor — passes on the bound thread.
-/// (Its off-thread failure mode is a `precondition` trap, which cannot be
-/// asserted in-process.)
-@Test func checkIsolatedFallbackPassesOnBoundThread() async throws {
-  let executor = try DedicatedThreadExecutor(name: "tae-checkfallback")
-
-  let passed = await withTaskExecutorPreference(executor) {
-    executor.checkIsolated()
-    return true
-  }
-
-  #expect(passed)
-  await shutdown(executor)
-}

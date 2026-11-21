@@ -220,14 +220,4 @@ final class QueueCell<Element: ~Copyable>: @unchecked Sendable {
     defer { condition.unlock() }
     return elements.count
   }
-
-  /// Removes and returns everything currently queued.
-  func drainAll() -> sending UniqueDeque<Element> {
-    condition.lock()
-    var drained = UniqueDeque<Element>()
-    swap(&drained, &elements)
-    condition.unlock()
-    condition.broadcast()
-    return drained
-  }
 }

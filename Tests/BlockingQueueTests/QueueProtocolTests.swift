@@ -114,22 +114,13 @@ private func inspectLifecycle<S: QueueLifecycleProtocol & QueueInspectionProtoco
   #expect(supervisor.isClosed)
 }
 
-private func drainSupervisor<S: QueueDrainProtocol>(
-  _ supervisor: S
-) where S.Element == Int {
-  var drained = supervisor.drainAll()
-  #expect(drained.count == 1)
-  #expect(drained.popFirst() == 1)
-}
-
 private func exerciseLockBasedSupervisor<Q: MPMCQueueProtocol & ~Copyable>(
   _ token: consuming Q
-) where Q.Element == Int, Q.MPMCSupervisor: QueueDrainProtocol {
+) where Q.Element == Int {
   let ends = token.split(.mpmc)
   let accepted = ends.producer.enqueue(1)
   #expect(accepted)
   inspectLifecycle(ends.supervisor)
-  drainSupervisor(ends.supervisor)
   release(ends.consumer)
 }
 

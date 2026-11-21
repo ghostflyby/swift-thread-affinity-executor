@@ -80,10 +80,10 @@ construction token is split, so the chosen shape is a static guarantee:
 
 | Shape | Split call | Producer | Consumer |
 | --- | --- | --- | --- |
-| SPSC | `split(.spsc)` | `QueueProducer` / `BoundedQueueProducer` | `QueueConsumer` |
-| MPSC | `split(.mpsc)` | `SharedQueueProducer` / `SharedBoundedQueueProducer` | `QueueConsumer` |
-| SPMC | `split(.spmc)` | `QueueProducer` / `BoundedQueueProducer` | `SharedQueueConsumer` |
-| MPMC | `split(.mpmc)` | `SharedQueueProducer` / `SharedBoundedQueueProducer` | `SharedQueueConsumer` |
+| SPSC | `split(.spsc)` | `UnboundedQueueProducer` / `BoundedQueueProducer` | `QueueConsumer` |
+| MPSC | `split(.mpsc)` | `SharedUnboundedQueueProducer` / `SharedBoundedQueueProducer` | `QueueConsumer` |
+| SPMC | `split(.spmc)` | `UnboundedQueueProducer` / `BoundedQueueProducer` | `SharedQueueConsumer` |
+| MPMC | `split(.mpmc)` | `SharedUnboundedQueueProducer` / `SharedBoundedQueueProducer` | `SharedQueueConsumer` |
 
 `LinkedQueue` has its own endpoints: `split(.mpsc)` returns the cloneable
 `LinkedQueueProducer` and the exclusive `LinkedQueueConsumer`;
@@ -132,8 +132,7 @@ while let value = consumer.take() {  // blocks; nil after close + drain
 `tryTake()` never waits; `take()` blocks until an element arrives or the
 queue is closed and drained. `nil` from `tryTake()` is not terminal while
 producers are still running; drain until `supervisor.isSealed`. The consumer
-end is exclusive and non-`Sendable`; the supervisor has no `drainAll`, so
-drain through the consumer.
+end is exclusive and non-`Sendable`; drain through the consumer.
 
 ### Capability protocols
 
@@ -145,7 +144,6 @@ The queues share one protocol set, so generic code can accept any of them:
 | `QueueConsumerProtocol` / `TryQueueConsumerProtocol` | `take` / `tryTake` |
 | `QueueLifecycleProtocol` | `close`, `isClosed`, `isSealed`, `waitUntilSealed` |
 | `QueueInspectionProtocol` | `count` |
-| `QueueDrainProtocol` | `drainAll` |
 | `SingleProducerProtocol` / `MultiProducerProtocol` | exclusive / shareable producer end |
 | `SingleConsumerProtocol` / `MultiConsumerProtocol` | exclusive / shareable consumer end |
 | `SPSCQueueProtocol` | `split(.spsc)` |
@@ -163,14 +161,14 @@ func drive<Q: MPSCQueueProtocol & ~Copyable>(_ queue: consuming Q)
 where Q.Element == Int {
   let ends = queue.split(.mpsc)
   ends.producer.enqueue(1)
-  ends.consumer.take()
+  _ = ends.consumer.take()
 }
 ```
 
 `QueueEnds<P, C, S>` bundles a producer, consumer and supervisor. Its
 initializer is public, so another queue family can conform to the category
-protocols; the `SPSCQueueEnds`, `BoundedMPSCQueueEnds`, `LinkedMPSCQueueEnds`,
-… names are aliases of that bundle.
+protocols; the `UnboundedSPSCQueueEnds`, `BoundedMPSCQueueEnds`,
+`LinkedMPSCQueueEnds`, … names are aliases of that bundle.
 
 ## Build / test
 

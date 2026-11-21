@@ -41,7 +41,7 @@ public final class DedicatedThreadExecutor: ThreadBoundExecutor, @unchecked Send
     handshake.threadID
   }
 
-  private let producer: SharedQueueProducer<UnownedJob>
+  private let producer: SharedUnboundedQueueProducer<UnownedJob>
   private let consumer: QueueConsumer<UnownedJob>
   private let supervisor: QueueSupervisor<UnownedJob>
   private let handshake = StartupHandshake()

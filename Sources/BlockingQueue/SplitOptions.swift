@@ -3,7 +3,7 @@
 //  BlockingQueue
 //
 //  Compile-time shape selectors for `split`. The option value is never read;
-//  each selector type carries a uniquely named constant so that
+//  each selector type carries a uniquely named case so that
 //  `queue.split(.mpsc)` resolves through overload resolution into the ends
 //  struct with the matching endpoint types. Shapes are fixed at split time:
 //  exclusive ends have no `share()` upgrade, so SPSC/MPSC/SPMC/MPMC are
@@ -11,35 +11,27 @@
 //
 
 /// Selects single-producer, single-consumer ends: the exclusive SPSC ends.
-public struct SPSCOption: Sendable {
-  private init() {}
-
+public enum SPSCOption: Sendable {
   /// The `split(.spsc)` selector.
-  public static let spsc = SPSCOption()
+  case spsc
 }
 
 /// Selects multiple-producer, single-consumer ends: a cloneable producer
 /// side and an exclusive consumer.
-public struct MPSCOption: Sendable {
-  private init() {}
-
+public enum MPSCOption: Sendable {
   /// The `split(.mpsc)` selector.
-  public static let mpsc = MPSCOption()
+  case mpsc
 }
 
 /// Selects single-producer, multiple-consumer ends: an exclusive producer
 /// and a cloneable consumer side whose takers compete per element.
-public struct SPMCOption: Sendable {
-  private init() {}
-
+public enum SPMCOption: Sendable {
   /// The `split(.spmc)` selector.
-  public static let spmc = SPMCOption()
+  case spmc
 }
 
 /// Selects multiple-producer, multiple-consumer ends: both sides cloneable.
-public struct MPMCOption: Sendable {
-  private init() {}
-
+public enum MPMCOption: Sendable {
   /// The `split(.mpmc)` selector.
-  public static let mpmc = MPMCOption()
+  case mpmc
 }

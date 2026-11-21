@@ -30,7 +30,7 @@ import Synchronization
 /// `finalize()` requires an existing binding. Construction itself is not
 /// bound, and `post()`/`stop()` are safe from any thread.
 public final class QueueDispatcher: FixedThreadDispatcher {
-  private let producer: SharedQueueProducer<@Sendable () -> Void>
+  private let producer: SharedUnboundedQueueProducer<@Sendable () -> Void>
   private let consumer: QueueConsumer<@Sendable () -> Void>
   private let supervisor: QueueSupervisor<@Sendable () -> Void>
   private let ownerThread = Mutex<ThreadID?>(nil)
