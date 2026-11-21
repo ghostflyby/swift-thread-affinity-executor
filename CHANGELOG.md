@@ -8,6 +8,8 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-21
+
 ### Added
 
 - `ThreadAffinityExecutor` library: `ThreadID` (cross-platform OS thread
@@ -35,3 +37,4 @@ and this project adheres to
   (see README).
 
 [Unreleased]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.0...HEAD
+[0.1.0]: https://github.com/ghostflyby/swift-thread-affinity-executor/releases/tag/0.1.0

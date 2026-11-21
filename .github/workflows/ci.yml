@@ -197,6 +197,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -205,16 +206,36 @@ jobs:
         uses: thomaseizinger/keep-a-changelog-new-release@v2
         with:
           tag: ${{ github.event.release.tag_name }}
-      - name: Commit folded changelog
+      # A repository rule requires main changes to arrive via pull request,
+      # so the fold lands as a bot PR that is squash-merged immediately.
+      # The ruleset demands zero approving reviews and no status checks,
+      # which is what lets the same token merge its own fold PR.
+      - name: Open and merge the fold PR
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add CHANGELOG.md
-          if git diff --cached --quiet; then
+          if git diff --quiet; then
             echo "CHANGELOG.md unchanged — nothing to fold"
             exit 0
           fi
+          branch="changelog/fold-$TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add CHANGELOG.md
           git commit -m "chore(changelog): fold Unreleased into $TAG"
-          git push origin HEAD:main
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "chore(changelog): fold Unreleased into $TAG" \
+            --body "Automated changelog fold for release [$TAG](https://github.com/ghostflyby/swift-thread-affinity-executor/releases/tag/$TAG)."
+          for attempt in 1 2 3; do
+            if gh pr merge "$branch" --squash --delete-branch; then
+              echo "Fold PR merged"
+              exit 0
+            fi
+            echo "merge attempt $attempt failed — retrying after mergeability settles"
+            sleep 5
+          done
+          echo "::error::could not merge the changelog fold PR — merge it manually"
+          exit 1
