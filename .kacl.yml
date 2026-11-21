@@ -1,0 +1,23 @@
+# python-kacl configuration — the release pipeline (draft-release and
+# fold-changelog jobs in .github/workflows/ci.yml) validates and folds
+# CHANGELOG.md through kacl-cli using this file.
+kacl:
+  file: CHANGELOG.md
+  # The changelog declares Keep a Changelog 1.1.0, the current spec
+  # revision; kacl's built-in default content expects the 1.0.0 URL.
+  default_content:
+    - All notable changes to this project will be documented in this file.
+    - The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+  release:
+    add_unreleased: true
+  git:
+    commit: false
+    tag: false
+  links:
+    auto_generate: false
+    compare_versions_template: '{host}/compare/{previous_version}...{version}'
+    # kacl's default points at a branch named "master"; this repo uses HEAD.
+    unreleased_changes_template: '{host}/compare/{latest_version}...HEAD'
+    # The first release has no predecessor to compare against; link its
+    # release page, matching the existing [0.1.0] entry.
+    initial_version_template: '{host}/releases/tag/{version}'
