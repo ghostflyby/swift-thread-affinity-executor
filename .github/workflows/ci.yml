@@ -21,6 +21,10 @@ concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege by default; the release jobs override with what they need.
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: swift-format
@@ -155,9 +159,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - name: Extract Unreleased section from CHANGELOG.md
+      - uses: astral-sh/setup-uv@v10
+      - name: Verify changelog and extract the Unreleased section
         run: |
-          awk '/^## \[Unreleased\]/{flag=1;next} /^## \[/ || /^\[[^]]+\]:/{flag=0} flag' CHANGELOG.md > "$RUNNER_TEMP/unreleased.md"
+          uvx --from python-kacl kacl-cli verify
+          uvx --from python-kacl kacl-cli get Unreleased --no-header --no-link > "$RUNNER_TEMP/unreleased.md"
           if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/unreleased.md"; then
             echo "::error::CHANGELOG.md has no entries under [Unreleased] — write them before tagging."
             exit 1
@@ -207,47 +213,19 @@ jobs:
       # The ruleset demands zero approving reviews and no status checks,
       # which is what lets the same token merge its own fold PR.
       #
-      # The fold itself is an in-repo transform (no third-party action:
-      # keep-a-changelog-new-release enforces its own private link format
-      # and rejected ours). The link convention is Keep a Changelog's own —
-      # [Unreleased] and every release compare with the previous tag; the
-      # first release, having no predecessor, links its tag page.
+      # The fold itself is kacl-cli (python-kacl): it validates the
+      # changelog, refuses an empty [Unreleased], and regenerates the
+      # version links per the configuration in .kacl.yml.
+      - uses: astral-sh/setup-uv@v10
       - name: Fold Unreleased into ${{ github.event.release.tag_name }}
         env:
           TAG: ${{ github.event.release.tag_name }}
-        run: |
-          if ! awk '/^## \[Unreleased\]/{flag=1;next} /^## \[/ || /^\[[^]]+\]:/{flag=0} flag' CHANGELOG.md | grep -q '[^[:space:]]'; then
-            echo "CHANGELOG.md has no [Unreleased] entries — nothing to fold"
-            exit 0
-          fi
-          date=$(date +%F)
-          base=$(sed -n 's#^\[Unreleased\]: \(.*\)/compare/.*$#\1#p' CHANGELOG.md | sed -n '1p')
-          if [ -z "$base" ]; then
-            echo "::error::no [Unreleased] compare link at the bottom of CHANGELOG.md"
-            exit 1
-          fi
-          prev=$(sed -n 's#^\[Unreleased\]: .*/compare/\(.*\)\.\.\.HEAD$#\1#p' CHANGELOG.md | sed -n '1p')
-          if [ -n "$prev" ]; then
-            version_link="[$TAG]: $base/compare/$prev...$TAG"
-          else
-            version_link="[$TAG]: $base/releases/tag/$TAG"
-          fi
-          awk -v tag="$TAG" -v date="$date" -v base="$base" -v vlink="$version_link" '
-            !folded && /^## \[Unreleased\]$/ {
-              print; print ""; print "## [" tag "] - " date; folded = 1; next
-            }
-            /^\[Unreleased\]: .*\/compare\// {
-              print "[Unreleased]: " base "/compare/" tag "...HEAD"
-              print vlink
-              next
-            }
-            { print }
-          ' CHANGELOG.md > CHANGELOG.folded.md
-          mv CHANGELOG.folded.md CHANGELOG.md
+        run: uvx --from python-kacl kacl-cli release "$TAG" --modify --auto-link
       - name: Open and merge the fold PR
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
         run: |
           if git diff --quiet; then
             echo "CHANGELOG.md unchanged — nothing to fold"
@@ -262,7 +240,7 @@ jobs:
           git push origin "$branch"
           gh pr create --base main --head "$branch" \
             --title "chore(changelog): fold Unreleased into $TAG" \
-            --body "Automated changelog fold for release [$TAG](https://github.com/ghostflyby/swift-thread-affinity-executor/releases/tag/$TAG)."
+            --body "Automated changelog fold for release [$TAG](https://github.com/$REPO/releases/tag/$TAG)."
           for attempt in 1 2 3; do
             if gh pr merge "$branch" --squash --delete-branch; then
               echo "Fold PR merged"
