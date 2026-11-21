@@ -13,7 +13,7 @@ import Testing
 /// Blocks until the consumer has parked on the element condition, so wake
 /// tests do not depend on a fixed sleep before the producer acts.
 private func waitForParkedConsumer<Element: ~Copyable>(
-  _ supervisor: LockFreeMPSCQueueSupervisor<Element>,
+  _ supervisor: LinkedQueueSupervisor<Element>,
   timeout: TimeInterval = 2
 ) {
   let deadline = Date().addingTimeInterval(timeout)
@@ -56,11 +56,11 @@ private func waitForParkedConsumer<Element: ~Copyable>(
   // shape cannot drop only the producer while keeping the other ends alive.
   let cell = LockFreeMPSCQueueCell<Int>()
   cell.registerEnds()
-  let consumer = LockFreeMPSCQueueConsumer(cell: cell)
-  let supervisor = LockFreeMPSCQueueSupervisor(cell: cell)
+  let consumer = LinkedQueueConsumer(cell: cell)
+  let supervisor = LinkedQueueSupervisor(cell: cell)
 
   do {
-    let producer = LockFreeMPSCQueueProducer(cell: cell)
+    let producer = LinkedQueueProducer(cell: cell)
     #expect(producer.enqueue(1))
   }
 

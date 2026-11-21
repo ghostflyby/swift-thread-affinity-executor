@@ -12,9 +12,9 @@ import Testing
 @testable import BlockingQueue
 
 private actor NonSendableConsumerRunner {
-  private let consumer: LockFreeMPSCQueueConsumer<Int>
+  private let consumer: LinkedQueueConsumer<Int>
 
-  init(_ consumer: consuming sending LockFreeMPSCQueueConsumer<Int>) {
+  init(_ consumer: consuming sending LinkedQueueConsumer<Int>) {
     self.consumer = consumer
   }
 

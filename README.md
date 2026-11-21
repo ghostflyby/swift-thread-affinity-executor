@@ -87,9 +87,9 @@ chosen shape is a static guarantee:
 | MPMC | `split(.mpmc)` | `SharedQueueProducer` / `SharedBoundedQueueProducer` | `SharedQueueConsumer` |
 
 `LinkedQueue` has its own endpoints: `split(.mpsc)` returns the
-cloneable `LockFreeMPSCQueueProducer` and the exclusive
-`LockFreeMPSCQueueConsumer`; `split(.spsc)` returns
-`LockFreeMPSCQueueExclusiveProducer`, a move-only view that holds the shared
+cloneable `LinkedQueueProducer` and the exclusive
+`LinkedQueueConsumer`; `split(.spsc)` returns
+`LinkedQueueExclusiveProducer`, a move-only view that holds the shared
 producer reference without exposing it, together with the same consumer and
 supervisor.
 
@@ -165,7 +165,7 @@ link lands after it is stranded, since no taker remains). `split(.mpsc)`
 returns a `sending` bundle: the producer and supervisor are `Sendable` and can
 be shared, while the consumer is non-`Sendable` and must stay in the domain it
 was handed to. `split(.spsc)` returns the same consumer and supervisor with a
-move-only `LockFreeMPSCQueueExclusiveProducer`, so the single-producer shape
+move-only `LinkedQueueExclusiveProducer`, so the single-producer shape
 does not expose the shared class reference. The cell additionally traps on
 concurrent consumer entry. The supervisor exposes no `drainAll`; drain through
 the consumer.
@@ -206,7 +206,7 @@ The category protocols form a lattice:
 `UnboundedQueue` and `BoundedQueue` declare only `MPMCQueueProtocol`;
 `LinkedQueue` declares `MPSCQueueProtocol`, so it is also usable
 wherever `SPSCQueueProtocol` is required. Its `split(.spsc)` returns the
-move-only `LockFreeMPSCQueueExclusiveProducer` wrapper over the shared
+move-only `LinkedQueueExclusiveProducer` wrapper over the shared
 reference, so SPSC generic code cannot clone it and the shared class is not
 exposed. A generic function can require a category and call that `split`
 directly:
@@ -233,8 +233,8 @@ identity.
 `QueueEnds<P, C, S>` composes a producer, consumer and supervisor with one
 shared element type. Its initializer is public, so another queue family can
 build the bundle and conform to the category protocols. The existing ends
-names — `SPSCQueueEnds`, `BoundedMPSCQueueEnds`, `LockFreeMPSCQueueEnds`,
-`LockFreeSPSCQueueEnds`, … — are aliases of that generic bundle. The lock-free
+names — `SPSCQueueEnds`, `BoundedMPSCQueueEnds`, `LinkedMPSCQueueEnds`,
+`LinkedSPSCQueueEnds`, … — are aliases of that generic bundle. The lock-free
 consumer is non-`Sendable`, so both lock-free ends bundles are non-`Sendable`;
 the `.mpsc` producer and supervisor remain `Sendable`, and the `.spsc`
 producer is the move-only exclusive wrapper.

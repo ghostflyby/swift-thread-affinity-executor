@@ -199,12 +199,12 @@ private enum CompileCheckError: Error {
         supervisor.drainAll()
       }
 
-      func pullLockFree(_ consumer: borrowing LockFreeMPSCQueueConsumer<Payload>) -> sending Payload? {
+      func pullLockFree(_ consumer: borrowing LinkedQueueConsumer<Payload>) -> sending Payload? {
         consumer.take()
       }
 
       func tryPullLockFree(
-        _ consumer: borrowing LockFreeMPSCQueueConsumer<Payload>
+        _ consumer: borrowing LinkedQueueConsumer<Payload>
       ) -> sending Payload? {
         consumer.tryTake()
       }
@@ -240,7 +240,7 @@ private enum CompileCheckError: Error {
       ("BoundedQueueProducer", "enqueueBlocking"),
       ("SharedBoundedQueueProducer", "enqueue"),
       ("SharedBoundedQueueProducer", "enqueueBlocking"),
-      ("LockFreeMPSCQueueProducer", "enqueue"),
+      ("LinkedQueueProducer", "enqueue"),
     ]
     for check in producerChecks {
       try expectSendingViolation(
@@ -324,9 +324,9 @@ private enum CompileCheckError: Error {
       import BlockingQueue
 
       final class Holder: Sendable {
-        let consumer: LockFreeMPSCQueueConsumer<Int>
+        let consumer: LinkedQueueConsumer<Int>
 
-        init(_ consumer: consuming LockFreeMPSCQueueConsumer<Int>) {
+        init(_ consumer: consuming LinkedQueueConsumer<Int>) {
           self.consumer = consumer
         }
       }
