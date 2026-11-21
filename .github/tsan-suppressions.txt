@@ -1,0 +1,10 @@
+# swiftlang/swift#94511: on Linux, ThreadSanitizer cannot see the acquire in
+# Synchronization.Mutex's non-inlined slow path (`_lockSlow`, plain-futex),
+# so it reports false races between withLock bodies on contended Mutexes.
+# All frames below are accesses inside the same Mutex.withLock and are false
+# positives. Remove these entries once the toolchain includes the upstream
+# fix, swiftlang/swift#94425 (and its XFAIL test, swiftlang/swift#94307).
+race:fulfillSuccess
+race:awaitReady
+race:bindOwnerThread
+race:requireOwnerThread
