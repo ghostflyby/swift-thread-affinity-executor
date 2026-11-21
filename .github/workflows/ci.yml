@@ -16,7 +16,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install swift-format
         run: brew install swift-format
       - name: Lint
@@ -39,7 +39,7 @@ jobs:
           - { os: ubuntu-24.04, config: debug }
           - { os: ubuntu-24.04, config: release }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # setup-swift v2's version catalog ends at 6.2.1; v3 resolves releases
       # through Swiftly and can install 6.4.2.
       - name: Set up Swift
@@ -80,7 +80,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Swift
         uses: compnerd/gha-setup-swift@main
         with:
@@ -107,7 +107,7 @@ jobs:
           - generic/platform=watchOS
           - generic/platform=visionOS
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build for ${{ matrix.destination }}
         run: >-
           xcodebuild -scheme ThreadAffinityExecutor
