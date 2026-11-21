@@ -8,6 +8,8 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-21
+
 ### Fixed
 
 - Release automation: the changelog fold for a published release now lands
@@ -42,5 +44,6 @@ and this project adheres to
 - Executors impose a quiescence contract before `shutdown()` / `detach()`
   (see README).
 
-[Unreleased]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.0...HEAD
+[Unreleased]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.1...HEAD
+[0.1.1]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/ghostflyby/swift-thread-affinity-executor/releases/tag/0.1.0

@@ -202,14 +202,48 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: main
-      - name: Fold Unreleased into ${{ github.event.release.tag_name }}
-        uses: thomaseizinger/keep-a-changelog-new-release@v2
-        with:
-          tag: ${{ github.event.release.tag_name }}
       # A repository rule requires main changes to arrive via pull request,
       # so the fold lands as a bot PR that is squash-merged immediately.
       # The ruleset demands zero approving reviews and no status checks,
       # which is what lets the same token merge its own fold PR.
+      #
+      # The fold itself is an in-repo transform (no third-party action:
+      # keep-a-changelog-new-release enforces its own private link format
+      # and rejected ours). The link convention is Keep a Changelog's own —
+      # [Unreleased] and every release compare with the previous tag; the
+      # first release, having no predecessor, links its tag page.
+      - name: Fold Unreleased into ${{ github.event.release.tag_name }}
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if ! awk '/^## \[Unreleased\]/{flag=1;next} /^## \[/ || /^\[[^]]+\]:/{flag=0} flag' CHANGELOG.md | grep -q '[^[:space:]]'; then
+            echo "CHANGELOG.md has no [Unreleased] entries — nothing to fold"
+            exit 0
+          fi
+          date=$(date +%F)
+          base=$(sed -n 's#^\[Unreleased\]: \(.*\)/compare/.*$#\1#p' CHANGELOG.md | sed -n '1p')
+          if [ -z "$base" ]; then
+            echo "::error::no [Unreleased] compare link at the bottom of CHANGELOG.md"
+            exit 1
+          fi
+          prev=$(sed -n 's#^\[Unreleased\]: .*/compare/\(.*\)\.\.\.HEAD$#\1#p' CHANGELOG.md | sed -n '1p')
+          if [ -n "$prev" ]; then
+            version_link="[$TAG]: $base/compare/$prev...$TAG"
+          else
+            version_link="[$TAG]: $base/releases/tag/$TAG"
+          fi
+          awk -v tag="$TAG" -v date="$date" -v base="$base" -v vlink="$version_link" '
+            !folded && /^## \[Unreleased\]$/ {
+              print; print ""; print "## [" tag "] - " date; folded = 1; next
+            }
+            /^\[Unreleased\]: .*\/compare\// {
+              print "[Unreleased]: " base "/compare/" tag "...HEAD"
+              print vlink
+              next
+            }
+            { print }
+          ' CHANGELOG.md > CHANGELOG.folded.md
+          mv CHANGELOG.folded.md CHANGELOG.md
       - name: Open and merge the fold PR
         env:
           GH_TOKEN: ${{ github.token }}
