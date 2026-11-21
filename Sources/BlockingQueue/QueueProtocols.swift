@@ -35,6 +35,9 @@ public protocol QueueConsumerProtocol<Element>: ~Copyable {
 }
 
 /// Non-blocking dequeue capability; `nil` means the queue is currently empty.
+///
+/// An empty observation does not by itself mean production is finished; the
+/// concrete consumer documents when the queue becomes terminal.
 public protocol TryQueueConsumerProtocol<Element>: ~Copyable, QueueConsumerProtocol
 where Element: ~Copyable {
   @discardableResult

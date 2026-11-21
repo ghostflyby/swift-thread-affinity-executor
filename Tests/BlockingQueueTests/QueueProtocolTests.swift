@@ -215,6 +215,48 @@ private func tryTake<C: TryQueueConsumerProtocol & ~Copyable>(
   release(ends.consumer)
 }
 
+@Test func blockingTryTakeDeliversBeforeSealingClosedQueue() {
+  let ends = UnboundedQueue<Int>().split(.spsc)
+  let accepted = ends.producer.enqueue(1)
+  #expect(accepted)
+  ends.supervisor.close()
+
+  let first = ends.consumer.tryTake()
+  #expect(first == 1)
+  #expect(ends.supervisor.isSealed == false)
+
+  let empty = ends.consumer.tryTake()
+  #expect(empty == nil)
+  #expect(ends.supervisor.isSealed)
+  release(ends.consumer)
+}
+
+@Test func blockingTryTakePreservesFIFO() {
+  let ends = UnboundedQueue<Int>().split(.spsc)
+  for value in 1...3 {
+    let accepted = ends.producer.enqueue(value)
+    #expect(accepted)
+  }
+
+  tryTake(ends.consumer, expecting: 1)
+  tryTake(ends.consumer, expecting: 2)
+  tryTake(ends.consumer, expecting: 3)
+  release(ends.consumer)
+}
+
+@Test func unboundedEnqueueBlockingRejectsClosedAndSealedQueue() {
+  let ends = UnboundedQueue<Int>().split(.spsc)
+  ends.supervisor.close()
+
+  let closed = ends.producer.enqueueBlocking(1)
+  #expect(closed == false)
+
+  release(ends.consumer)
+  let sealed = ends.producer.enqueueBlocking(2)
+  #expect(sealed == false)
+  release(ends.producer)
+}
+
 @Test func categoryProtocolsAcceptNonCopyableElements() {
   func roundTripMPSC<Q: MPSCQueueProtocol & ~Copyable>(
     _ token: consuming Q
