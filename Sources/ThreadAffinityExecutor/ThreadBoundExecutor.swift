@@ -30,7 +30,7 @@
 ///    jobs arriving after the termination request — is the sole exception.
 /// 7. **Lifetime validity** — while tasks or actors may still submit jobs,
 ///    the bound thread and the scheduling channel remain usable.
-public protocol ThreadBoundExecutor: Affinity {
+public protocol ThreadBoundExecutor: ThreadAffinityExecutor {
   /// The OS thread this executor is bound to. Stable after publication.
   var threadID: ThreadID { get }
 }

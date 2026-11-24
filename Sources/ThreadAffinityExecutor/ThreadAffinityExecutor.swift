@@ -17,13 +17,13 @@
 /// 2. **Ordered exchange** — when the current thread changes, everything
 ///    routed to the old thread has completed, and jobs keep their acceptance
 ///    order across the exchange.
-public protocol Affinity: SerialExecutor, TaskExecutor {
+public protocol ThreadAffinityExecutor: SerialExecutor, TaskExecutor {
   /// The OS thread this executor's jobs run on right now: a synchronous
   /// caller on it is isolated with respect to them.
   var currentThreadID: ThreadID { get }
 }
 
-extension Affinity {
+extension ThreadAffinityExecutor {
   /// Dynamic isolation check consumed by the Swift 6.4+ runtime after
   /// regular executor-identity comparison fails.
   ///

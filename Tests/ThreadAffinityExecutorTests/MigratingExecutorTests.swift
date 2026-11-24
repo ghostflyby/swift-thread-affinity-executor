@@ -973,7 +973,7 @@ private func stop(_ host: AttachedHost) async {
 @Test func bothExecutorFamiliesAreAffinity() async throws {
   let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
   let executor = MigratingThreadExecutor(bound: first)
-  let executors: [any Affinity] = [first, executor]
+  let executors: [any ThreadAffinityExecutor] = [first, executor]
 
   #expect(executors.map { $0.currentThreadID } == [first.threadID, first.threadID])
 

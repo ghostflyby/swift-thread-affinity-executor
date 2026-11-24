@@ -75,7 +75,7 @@ public enum MigrationError: Error, Sendable, Equatable {
 /// it needs an explicit `withTaskExecutorPreference`. Code after such a
 /// scope is no longer the executor's job: it continues on the executor the
 /// task had before the scope.
-public final class MigratingThreadExecutor: Affinity {
+public final class MigratingThreadExecutor: ThreadAffinityExecutor {
 
   /// Routing table under one lock. A job is accepted inside the lock, so
   /// the lock order is always routing first, then a bound executor's queue.
