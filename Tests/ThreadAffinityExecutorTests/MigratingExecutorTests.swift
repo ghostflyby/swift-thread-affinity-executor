@@ -101,10 +101,11 @@ private actor MigrationCounter {
     }
   }
 
-  /// From actor-isolated code, a task whose body needs no isolation.
-  func spawnBystander(_ threads: TestBox<[ThreadID]>) {
+  /// From actor-isolated code, a task whose body needs no isolation: it
+  /// reports the thread it started on.
+  func spawnBystander() -> Task<ThreadID, Never> {
     Task {
-      threads.with { $0.append(ThreadID.current) }
+      ThreadID.current
     }
   }
 }
@@ -681,24 +682,26 @@ private func stop(_ host: AttachedHost) async {
   let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: first)
   let counter = MigrationCounter(executor: executor)
-  let threads = TestBox<[ThreadID]>([])
   let created = 8
 
+  // Each task reports the thread it started on and shares nothing.
+  var bystanders: [Task<ThreadID, Never>] = []
   await withTaskExecutorPreference(executor) {
     for _ in 0..<created {
-      Task {
-        threads.with { $0.append(ThreadID.current) }
-      }
+      bystanders.append(Task { ThreadID.current })
     }
   }
   for _ in 0..<created {
-    await counter.spawnBystander(threads)
+    bystanders.append(await counter.spawnBystander())
   }
   try await executor.migrate(to: second)
 
-  let recorded = try await waitUntil { threads.get().count == 2 * created }
-  #expect(recorded)
-  #expect(threads.get().allSatisfy { $0 != first.threadID && $0 != second.threadID })
+  var observed: [ThreadID] = []
+  for bystander in bystanders {
+    observed.append(await bystander.value)
+  }
+  #expect(observed.count == 2 * created)
+  #expect(observed.allSatisfy { $0 != first.threadID && $0 != second.threadID })
 
   await shutdown(first)
   await shutdown(second)
