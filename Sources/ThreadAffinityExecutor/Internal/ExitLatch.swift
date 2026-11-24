@@ -36,8 +36,9 @@ final class ExitLatch: @unchecked Sendable {
     condition.unlock()
   }
 
-  /// Suspends until `signal` without blocking the calling thread. Not
-  /// cancellable: the caller resumes only once the latch fired.
+  /// Suspends until `signal` without blocking the calling thread. The wait
+  /// does not respond to cancellation: the caller resumes only once the
+  /// latch fired.
   func waitAsync() async {
     await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
       condition.lock()

@@ -136,8 +136,9 @@ public final class DedicatedThreadExecutor: ThreadBoundExecutor, @unchecked Send
   /// request are dropped.
   ///
   /// The asynchronous counterpart of `shutdown()`: the calling task suspends
-  /// instead of blocking a thread, and is not cancellable — it returns only
-  /// once the worker finished.
+  /// instead of blocking a thread. The wait does not respond to cancellation
+  /// — it returns normally, once the worker finished, even when the calling
+  /// task was cancelled.
   ///
   /// - Precondition: awaited from a task that does not run on this executor,
   ///   with the quiescence contract satisfied (canceling tasks does not by
