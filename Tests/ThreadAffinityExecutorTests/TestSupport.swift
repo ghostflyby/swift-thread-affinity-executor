@@ -19,27 +19,6 @@ func waitForSignal(_ semaphore: DispatchSemaphore) async {
   }
 }
 
-/// Timed variant for tests that must distinguish "never woke" from a slow
-/// wake-up without parking a cooperative thread.
-func waitForSignal(_ semaphore: DispatchSemaphore, timeout: TimeInterval) async -> Bool {
-  await withCheckedContinuation { continuation in
-    DispatchQueue.global().async {
-      let result = semaphore.wait(timeout: .now() + timeout)
-      continuation.resume(returning: result == .success)
-    }
-  }
-}
-
-/// Runs the blocking dedicated-executor shutdown off the cooperative pool.
-func shutdown(_ executor: DedicatedThreadExecutor) async {
-  await withCheckedContinuation { continuation in
-    DispatchQueue.global().async {
-      executor.shutdown()
-      continuation.resume()
-    }
-  }
-}
-
 /// Runs the blocking attachment detach off the cooperative pool.
 @discardableResult
 func detach(_ executor: AttachedThreadExecutor) async -> Bool {

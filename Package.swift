@@ -39,13 +39,7 @@ let package = Package(
     ),
     .target(
       name: "ThreadAffinityExecutor",
-      dependencies: [
-        "BlockingQueue",
-        .product(
-          name: "DequeModule",
-          package: "swift-collections"
-        ),
-      ],
+      dependencies: ["BlockingQueue"],
       path: "Sources/ThreadAffinityExecutor"
     ),
     .testTarget(

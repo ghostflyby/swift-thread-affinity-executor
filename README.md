@@ -1,6 +1,6 @@
 # ThreadAffinityExecutor
 
-Thread-affinity executors for Swift Concurrency: every job accepted by one of these executors runs on the same OS thread for the executor's whole lifetime. The bound thread can be created by the library, provided by the caller, or borrowed from an existing fixed-thread mechanism.
+Thread-affinity executors for Swift Concurrency: at any moment, every job accepted by one of these executors runs on one known OS thread. A `ThreadBoundExecutor` keeps that thread for its whole lifetime; a `MigratingThreadExecutor` changes it only through an explicit migration. The bound thread can be created by the library, provided by the caller, or borrowed from an existing fixed-thread mechanism.
 
 ## Scope
 
@@ -9,11 +9,12 @@ Thread-affinity executors for Swift Concurrency: every job accepted by one of th
 | `BlockingQueue` (separate library product) | Split-endpoint FIFO queues: `UnboundedQueue` (grows) and `BoundedQueue` (fixed capacity); shape chosen by `split(.spsc)` / `.mpsc` / `.spmc` / `.mpmc`; elements cross by ownership (`sending`) | ✅ |
 | `LinkedQueue` (in `BlockingQueue`) | Unbounded MPSC queue; `split(.mpsc)` (cloneable producer) or `split(.spsc)` (move-only producer) | ✅ |
 | `ThreadID` | Cross-platform OS thread ID value type | ✅ |
-| `ThreadBoundExecutor` | `SerialExecutor + TaskExecutor` protocol bound to one OS thread | ✅ |
+| `ThreadAffinityExecutor` | Common protocol of the executor families: jobs run on one known OS thread at any moment (`currentThreadID`) | ✅ |
+| `ThreadBoundExecutor` | `ThreadAffinityExecutor` bound to one OS thread for its whole lifetime (`SerialExecutor + TaskExecutor`) | ✅ |
 | `DedicatedThreadExecutor` | Dedicated OS thread with optional on-thread `initialize`/`finalize` | ✅ |
 | `AttachedThreadExecutor` + `FixedThreadDispatcher` | Attach to any fixed thread with a `post` entry (main queue via `MainQueueDispatcher`, run loops, event loops); `detach()` terminates | ✅ |
 | `QueueDispatcher` | Pump for threads without an event loop | ✅ |
-| `MigratingThreadExecutor` + `ThreadGenerationDelegate` | One executor identity across bound-thread generations | 🔶 prototype |
+| `MigratingThreadExecutor` | One executor over a sequence of `ThreadBoundExecutor`s, exchanged through explicit migrations; bound executors are borrowed | 🔶 prototype |
 | Shutdown scopes / task tracking | Full quiescence machinery | ⏳ quiescence contract only |
 
 ## Contract
@@ -50,7 +51,8 @@ let counter = Counter(executor: executor)
 print(await counter.next()) // runs on the dedicated thread
 
 // after quiescence:
-executor.shutdown() // blocks until the queue drained and sealed; idempotent; never call on the bound thread
+await executor.shutdown() // suspends until the queue drained and sealed; idempotent; never await on the bound thread
+// the synchronous shutdown() blocks instead, for synchronous contexts
 ```
 
 ### Caller-driven pump (self-attach)
@@ -71,6 +73,23 @@ let mainExecutor = try await AttachedThreadExecutor.attach(to: MainQueueDispatch
 
 // any fixed-thread loop that provides a post entry:
 let executor = try await AttachedThreadExecutor.attach(to: myEventLoopDispatcher)
+```
+
+### Migrating between bound executors
+
+```swift
+let first = try DedicatedThreadExecutor(name: "first")
+let second = try DedicatedThreadExecutor(name: "second")
+
+// routes to `first`; actors bound to `executor` keep their binding across migrations
+let executor = MigratingThreadExecutor(bound: first)
+
+// jobs accepted before the cut finish on `first`; later ones run on `second`
+try await executor.migrate(to: second)
+
+// bound executors are borrowed: each ends through its own exit, once idle
+await first.shutdown()
+await second.shutdown()
 ```
 
 ### Endpoint shapes

@@ -31,7 +31,7 @@ import Testing
       group.addTask {
         let executor = try DedicatedThreadExecutor(name: "tae-concurrent-\(index)")
         #expect(executor.threadID != ThreadID.current)
-        await shutdown(executor)
+        await executor.shutdown()
       }
     }
     try await group.waitForAll()
@@ -57,7 +57,7 @@ import Testing
   }
   #expect(jobThread == initializerThreads.get().first)
   #expect(jobThread == executor.threadID)
-  await shutdown(executor)
+  await executor.shutdown()
 }
 
 private struct InitializationFailed: Error {}
@@ -95,7 +95,7 @@ private struct InitializationFailed: Error {}
   }
 
   // shutdown() joins the exit epilogue: finalize has completed here.
-  await shutdown(executor)
+  await executor.shutdown()
   #expect(finalThread.get() == jobThread.get())
   #expect(finalThread.get() == executor.threadID)
 }
@@ -122,7 +122,7 @@ private struct InitializationFailed: Error {}
 
   #expect(observed.count == 200)
   #expect(observed.allSatisfy { $0 == executor.threadID })
-  await shutdown(executor)
+  await executor.shutdown()
 }
 
 /// Concurrent submitters, exactly-once
@@ -147,7 +147,7 @@ private struct InitializationFailed: Error {}
 
   #expect(counter.value == 8 * 250)
   #expect(threadsSeen.get() == [executor.threadID])
-  await shutdown(executor)
+  await executor.shutdown()
 }
 
 // MARK: - Isolation checks
@@ -169,7 +169,7 @@ private struct InitializationFailed: Error {}
   }
 
   #expect(positive == true)
-  await shutdown(executor)
+  await executor.shutdown()
 }
 
 /// Jobs accepted before shutdown all execute; the
@@ -191,7 +191,74 @@ private struct InitializationFailed: Error {}
     }
   }
 
-  await shutdown(executor)
+  await executor.shutdown()
   #expect(counter.value == 200)
   #expect(executor.hasFinished)
+}
+
+/// The async shutdown resumes only after the exit epilogue: `finalize`
+/// blocks on a gate, and the shutdown task has not returned while it is
+/// held. A second call after the exit resolves immediately.
+@Test func asyncShutdownResumesOnlyAfterExit() async throws {
+  let finalizeStarted = DispatchSemaphore(value: 0)
+  let finalizeRelease = DispatchSemaphore(value: 0)
+  let finalizeDone = TestBox(false)
+  let executor = try DedicatedThreadExecutor(
+    name: "tae-async-shutdown",
+    lifecycle: ClosureLifecycle(
+      finalize: {
+        finalizeStarted.signal()
+        finalizeRelease.wait()
+        finalizeDone.set(true)
+      }
+    )
+  )
+  let returned = TestBox(false)
+  let shutdown = Task {
+    await executor.shutdown()
+    returned.set(true)
+  }
+
+  await waitForSignal(finalizeStarted)
+  // finalize is running and held: the caller must not have resumed.
+  #expect(returned.get() == false)
+
+  finalizeRelease.signal()
+  await shutdown.value
+  #expect(returned.get())
+  #expect(finalizeDone.get())
+  #expect(executor.hasFinished)
+
+  // After the exit the wait resolves immediately.
+  await executor.shutdown()
+}
+
+/// The async shutdown does not respond to cancellation: a cancelled caller
+/// still resumes, normally, once the exit epilogue completed.
+@Test func asyncShutdownDoesNotRespondToCancellation() async throws {
+  let finalizeStarted = DispatchSemaphore(value: 0)
+  let finalizeRelease = DispatchSemaphore(value: 0)
+  let executor = try DedicatedThreadExecutor(
+    name: "tae-async-cancel",
+    lifecycle: ClosureLifecycle(
+      finalize: {
+        finalizeStarted.signal()
+        finalizeRelease.wait()
+      }
+    )
+  )
+  let returned = TestBox(false)
+  let shutdown = Task {
+    await executor.shutdown()
+    returned.set(true)
+  }
+
+  await waitForSignal(finalizeStarted)
+  shutdown.cancel()
+  #expect(shutdown.isCancelled)
+  #expect(returned.get() == false)
+
+  finalizeRelease.signal()
+  await shutdown.value
+  #expect(returned.get())
 }

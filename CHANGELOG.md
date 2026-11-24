@@ -8,6 +8,37 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- `DedicatedThreadExecutor.shutdown() async`: suspends the calling task
+  until the worker drained, ran `finalize` and exited, instead of blocking a
+  thread. The synchronous `shutdown()` remains for synchronous contexts.
+- `ThreadAffinityExecutor`: the common protocol of the executor families.
+  Both `ThreadBoundExecutor` and `MigratingThreadExecutor` refine it.
+  `currentThreadID` names the thread this executor's jobs run on — it
+  switches at the migration barrier, not when routing stops — and the
+  thread-based `isIsolatingCurrentContext()` moved to it from
+  `ThreadBoundExecutor`.
+
+### Changed
+
+- **Breaking:** `MigratingThreadExecutor` is rebuilt over thread-bound
+  executors instead of pumps. It is constructed with `init(bound:)` on an
+  existing `ThreadBoundExecutor` and moves with `migrate(to:)`. Bound
+  executors are borrowed: a migration never ends one. The migration cut is
+  acceptance — jobs accepted before it finish on the old bound executor,
+  later ones run on the new one.
+- **Breaking:** `ThreadBoundExecutor` now requires jobs to run in acceptance
+  order. `SerialExecutor` alone permits reordering, and the migrating
+  executor's barrier depends on it.
+
+### Removed
+
+- **Breaking:** `ThreadGenerationDelegate` and `ClosureGenerationDelegate`,
+  along with the pump-based `MigratingThreadExecutor` API: `attach(to:)`,
+  `handOver(to:)`, `terminate()`, `current` and `Generation`.
+  `MigrationError` keeps only `busy`.
+
 ## [0.1.2] - 2026-11-21
 
 ### Fixed

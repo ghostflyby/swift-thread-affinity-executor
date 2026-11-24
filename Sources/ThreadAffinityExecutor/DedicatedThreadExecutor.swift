@@ -131,6 +131,30 @@ public final class DedicatedThreadExecutor: ThreadBoundExecutor, @unchecked Send
     exitLatch.wait()
   }
 
+  /// Requests shutdown and suspends until the queue drained, the worker ran
+  /// `finalize` and its exit epilogue completed. Jobs arriving after this
+  /// request are dropped.
+  ///
+  /// The asynchronous counterpart of `shutdown()`: the calling task suspends
+  /// instead of blocking a thread. The wait does not respond to cancellation
+  /// — it returns normally, once the worker finished, even when the calling
+  /// task was cancelled.
+  ///
+  /// - Precondition: awaited from a task that does not run on this executor,
+  ///   with the quiescence contract satisfied (canceling tasks does not by
+  ///   itself guarantee that). A task bound to the executor cannot await it:
+  ///   its resumption would be routed to the closed queue and never run. The
+  ///   check traps only when the awaiting thread is the bound thread at the
+  ///   call. Idempotent.
+  public func shutdown() async {
+    precondition(
+      ThreadID.current != threadID,
+      "shutdown() must not be awaited from a task bound to the executor"
+    )
+    supervisor.close()
+    await exitLatch.waitAsync()
+  }
+
   /// Whether the queue sealed, i.e. the worker observed drain-and-close
   /// and is exiting. Internal; tests and diagnostics.
   var hasFinished: Bool {

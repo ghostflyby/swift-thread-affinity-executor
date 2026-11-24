@@ -2,117 +2,104 @@
 //  MigratingExecutorTests.swift
 //  ThreadAffinityExecutorTests
 //
-//  Migration handoffs: generation advance, cross-generation serialization,
-//  actor transparency, transactional hook ordering, abort-on-failure,
-//  in-job handOver, termination.
+//  The migrating executor over thread-bound executors: the migration cut,
+//  staging and release order, isolation across the two identities, what
+//  follows a migration, and bound executors of either family — borrowed.
 //
 
 import Foundation
+import Synchronization
 import Testing
 
 @testable import ThreadAffinityExecutor
 
-private struct MigrationSetupFailed: Error {}
-
-/// Bootstrap for a pump thread servicing a `QueueDispatcher` — an exclusive
-/// pump, as the successor contract requires. The dispatcher is created
-/// inside the pump thread and handed back through a semaphore-ordered
-/// bootstrap; the first `run()` binds the pump there.
-private final class PumpBootstrap: @unchecked Sendable {
-  let ready = DispatchSemaphore(value: 0)
-  var dispatcher: QueueDispatcher?  // written before signal, read after wait
-
-  func publish(_ dispatcher: QueueDispatcher) {
-    self.dispatcher = dispatcher
-    ready.signal()
-  }
-}
-
-private func spawnPump(_ name: String) -> QueueDispatcher {
-  let bootstrap = PumpBootstrap()
-  let thread = Thread {
-    let dispatcher = QueueDispatcher()
-    bootstrap.publish(dispatcher)
-    dispatcher.run()
-  }
-  thread.name = name
-  thread.start()
-  bootstrap.ready.wait()
-  return bootstrap.dispatcher!
-}
-
-/// Blocking wait for executor jobs: the generation's pump runs on its own
-/// dedicated thread, so parking it does not occupy a cooperative thread.
-private func blockingWait(_ semaphore: DispatchSemaphore) {
-  semaphore.wait()
-}
-
-/// Pump that accepts the first post (the handshake) inline and rejects
-/// every later one. The inline handshake keeps the failure path
-/// deterministic; this is a test double for the serving-post rejection.
-private final class SecondPostRejectedPump: ThreadGenerationDelegate, @unchecked Sendable {
-  private let lock = NSLock()
-  private var posts = 0
-
-  @discardableResult
-  func post(_ work: @escaping @Sendable () -> Void) -> Bool {
-    lock.lock()
-    posts += 1
-    let call = posts
-    lock.unlock()
-    guard call == 1 else { return false }
-    work()
-    return true
+/// `ThreadBoundExecutor` the test drives by hand: every hand-over queues in
+/// the test's own queue and signals, and only a `permit` runs the next job
+/// on the bound thread. It is the test's barrier, and its queue is where
+/// acceptance is observed — not inside the library.
+private final class ManualBound: ThreadBoundExecutor, @unchecked Sendable {
+  private final class State: @unchecked Sendable {
+    let condition = NSCondition()
+    var jobs: [UnownedJob] = []
+    var permits = 0
+    var stopped = false
   }
 
-  func initialize(_ generation: MigratingThreadExecutor.Generation) throws {}
+  private let state = State()
+  private let published = TestBox<ThreadID?>(nil)
+  private let started = DispatchSemaphore(value: 0)
+  /// One signal per job handed over.
+  let received = DispatchSemaphore(value: 0)
+  private let finished = DispatchSemaphore(value: 0)
 
-  func finalize(_ generation: MigratingThreadExecutor.Generation) {}
-}
-
-/// Pump that rejects the handshake post outright.
-private struct ClosedPump: ThreadGenerationDelegate {
-  @discardableResult
-  func post(_ work: @escaping @Sendable () -> Void) -> Bool { false }
-}
-
-/// Per-generation pump delegate recording hook events with their threads;
-/// the boxes are shared across generations so event order stays observable.
-private final class RecordingPump: ThreadGenerationDelegate, @unchecked Sendable {
-  private let pump: QueueDispatcher
-  private let events: TestBox<[String]>
-  private let failEpoch: TestBox<Int?>
-
-  init(
-    pump: QueueDispatcher,
-    events: TestBox<[String]> = TestBox<[String]>([]),
-    failEpoch: TestBox<Int?> = TestBox(nil)
-  ) {
-    self.pump = pump
-    self.events = events
-    self.failEpoch = failEpoch
+  init(name: String) {
+    let thread = Thread { [self] in controlLoop() }
+    thread.name = name
+    thread.start()
+    started.wait()
   }
 
-  @discardableResult
-  func post(_ work: @escaping @Sendable () -> Void) -> Bool {
-    pump.post(work)
-  }
-
-  func initialize(_ generation: MigratingThreadExecutor.Generation) throws {
-    if failEpoch.get() == generation.epoch {
-      throw MigrationSetupFailed()
+  var threadID: ThreadID {
+    guard let threadID = published.get() else {
+      preconditionFailure("ManualBound read before its thread started")
     }
-    events.with { $0.append("initialize(\(generation.epoch))@\(ThreadID.current)") }
+    return threadID
   }
 
-  func finalize(_ generation: MigratingThreadExecutor.Generation) {
-    events.with { $0.append("finalize(\(generation.epoch))@\(ThreadID.current)") }
+  func enqueue(_ job: consuming ExecutorJob) {
+    state.condition.lock()
+    state.jobs.append(UnownedJob(job))
+    state.condition.broadcast()
+    state.condition.unlock()
+    received.signal()
+  }
+
+  /// Lets the next `count` queued jobs run on the bound thread.
+  func permit(_ count: Int = 1) {
+    state.condition.lock()
+    state.permits += count
+    state.condition.broadcast()
+    state.condition.unlock()
+  }
+
+  func stopAndJoin() async {
+    stop()
+    await waitForSignal(finished)
+  }
+
+  private func stop() {
+    state.condition.lock()
+    state.stopped = true
+    state.condition.broadcast()
+    state.condition.unlock()
+  }
+
+  private func controlLoop() {
+    published.set(ThreadID.current)
+    started.signal()
+    state.condition.lock()
+    while true {
+      if state.jobs.isEmpty && state.stopped {
+        state.condition.unlock()
+        finished.signal()
+        return
+      }
+      if state.permits > 0 && !state.jobs.isEmpty {
+        state.permits -= 1
+        let job = state.jobs.removeFirst()
+        state.condition.unlock()
+        runJob(job)
+        state.condition.lock()
+        continue
+      }
+      state.condition.wait()
+    }
   }
 }
 
-/// Actor fixture bound to a migrating executor — jobs must keep flowing
-/// across handoffs without rebinding.
-actor MigrationCounter {
+/// Actor fixture bound to the migrating executor — jobs must keep flowing
+/// across migrations without rebinding.
+private actor MigrationCounter {
   nonisolated let executor: MigratingThreadExecutor
   private var value = 0
 
@@ -132,456 +119,708 @@ actor MigrationCounter {
   func threadID() -> ThreadID {
     ThreadID.current
   }
-}
 
-@Test func migrationAdvancesGenerationAndThread() async throws {
-  let first = spawnPump("tae-migrate-first")
-  let second = spawnPump("tae-migrate-second")
-  let executor = try await MigratingThreadExecutor.attach(
-    to: ClosureGenerationDelegate(to: first)
-  )
-
-  let before = await withTaskExecutorPreference(executor) { ThreadID.current }
-  #expect(before == executor.current.threadID)
-  #expect(executor.current.epoch == 0)
-
-  try await executor.migrate(to: ClosureGenerationDelegate(to: second))
-
-  let after = await withTaskExecutorPreference(executor) { ThreadID.current }
-  #expect(after == executor.current.threadID)
-  #expect(after != before)
-  #expect(executor.current.epoch == 1)
-
-  await executor.terminate()
-  first.stop()
-  second.stop()
-}
-
-/// Jobs serialize across the handoff: every job that ran on the old
-/// generation's thread completes before any job runs on the successor's —
-/// the thread sequence never interleaves generations.
-@Test func jobsSerializeAcrossGenerations() async throws {
-  let first = spawnPump("tae-migrate-first")
-  let second = spawnPump("tae-migrate-second")
-  let executor = try await MigratingThreadExecutor.attach(
-    to: ClosureGenerationDelegate(to: first)
-  )
-  let observedThreads = TestBox<[ThreadID]>([])
-
-  // The first five jobs are fully accepted (executed) before migrating.
-  for _ in 0..<5 {
-    await withTaskExecutorPreference(executor) {
-      observedThreads.with { $0.append(ThreadID.current) }
+  /// From actor-isolated code, a task whose body uses the actor: it is an
+  /// actor job, so it takes the actor's executor.
+  func spawnFollower(
+    gate: DispatchSemaphore,
+    running: DispatchSemaphore,
+    done: DispatchSemaphore,
+    threads: TestBox<[ThreadID]>
+  ) {
+    Task {
+      _ = next()
+      threads.with { $0.append(ThreadID.current) }
+      running.signal()
+      await waitForSignal(gate)
+      threads.with { $0.append(ThreadID.current) }
+      done.signal()
     }
   }
-  let firstThread = executor.current.threadID
-  #expect(observedThreads.get().allSatisfy { $0 == firstThread })
 
-  // Jobs racing the handoff land on either generation — execution must
-  // still be all-old-thread, then all-new-thread. The group collects all
-  // child tasks so the final count is exact.
-  let racing = Task {
-    await withTaskGroup(of: Void.self) { group in
-      for _ in 0..<10 {
-        group.addTask {
-          await withTaskExecutorPreference(executor) {
-            observedThreads.with { $0.append(ThreadID.current) }
-          }
+  /// From actor-isolated code, a task whose body needs no isolation: it
+  /// reports the thread it started on.
+  func spawnBystander() -> Task<ThreadID, Never> {
+    Task {
+      ThreadID.current
+    }
+  }
+}
+
+/// Sync helper: `assumeIsolated` is unavailable from an async context.
+private func nextAssumingIsolated(_ counter: MigrationCounter) -> Int {
+  counter.assumeIsolated { site in
+    site.next()
+  }
+}
+
+/// Blocking wait for a job that must park its bound thread.
+private func blockingWait(_ semaphore: DispatchSemaphore) {
+  semaphore.wait()
+}
+
+/// The body of an `async let` child: records its thread, signals that it is
+/// running, waits for the gate, and records the thread again.
+private func recordAcross(
+  gate: DispatchSemaphore,
+  running: DispatchSemaphore,
+  threads: TestBox<[ThreadID]>
+) async {
+  threads.with { $0.append(ThreadID.current) }
+  running.signal()
+  await waitForSignal(gate)
+  threads.with { $0.append(ThreadID.current) }
+}
+
+/// Runs `count` jobs on `executor`; the threads they ran on.
+private func sampleThreads(
+  _ executor: MigratingThreadExecutor,
+  count: Int
+) async -> [ThreadID] {
+  await withTaskGroup(of: ThreadID.self) { group in
+    for _ in 0..<count {
+      group.addTask {
+        await withTaskExecutorPreference(executor) {
+          ThreadID.current
         }
       }
     }
+    var threads: [ThreadID] = []
+    for await thread in group {
+      threads.append(thread)
+    }
+    return threads
   }
-  try await executor.migrate(to: ClosureGenerationDelegate(to: second))
-  await racing.value
-
-  await withTaskExecutorPreference(executor) {
-    observedThreads.with { $0.append(ThreadID.current) }
-  }
-
-  let sequence = observedThreads.get()
-  #expect(sequence.count == 16)
-  #expect(sequence.first == firstThread)
-  #expect(sequence.last == executor.current.threadID)
-  if let handoff = sequence.firstIndex(where: { $0 != firstThread }) {
-    let after = sequence.dropFirst(handoff)
-    #expect(after.allSatisfy { $0 == executor.current.threadID })
-  }
-
-  await executor.terminate()
-  first.stop()
-  second.stop()
 }
 
-/// A migration handed a large accepted backlog: every job runs exactly
-/// once, and execution stays generation-serialized — all old-thread
-/// records precede all new-thread records.
-@Test func backlogMigrationRunsEachJobOnceInGenerationOrder() async throws {
-  let first = spawnPump("tae-migrate-first")
-  let second = spawnPump("tae-migrate-second")
-  let executor = try await MigratingThreadExecutor.attach(
-    to: ClosureGenerationDelegate(to: first)
-  )
+/// An attached executor and the pump its thread runs.
+private struct AttachedHost: Sendable {
+  let executor: AttachedThreadExecutor
+  let dispatcher: QueueDispatcher
+}
 
-  let jobCount = 10_000
-  let probeCount = 16
-  let firstThread = executor.current.threadID
-  let seen = TestBox<Set<Int>>([])
-  let observedThreads = TestBox<[ThreadID]>([])
-  let releasePump = DispatchSemaphore(value: 0)
+/// Hands an executor created on the pump thread back to its spawner; the
+/// executor is written before the signal and read after the wait.
+private final class AttachBootstrap: @unchecked Sendable {
+  let ready = DispatchSemaphore(value: 0)
+  var executor: AttachedThreadExecutor?
 
-  // One job holds the old pump. The producer's children below therefore
-  // cannot run; they accumulate in the old generation's queue.
-  let pumpHeld = DispatchSemaphore(value: 0)
-  let blocker = Task {
-    await withTaskExecutorPreference(executor) {
-      pumpHeld.signal()
-      blockingWait(releasePump)
-    }
+  func publish(_ executor: AttachedThreadExecutor) {
+    self.executor = executor
+    ready.signal()
   }
-  await waitForSignal(pumpHeld)
+}
 
-  // The producer is not bound to the executor: each child task hops onto
-  // the executor on its own, so adding the group does not require the
-  // pump that the blocker is holding.
-  let producer = Task {
-    await withTaskGroup(of: Void.self) { group in
-      for index in 0..<jobCount {
-        group.addTask {
-          await withTaskExecutorPreference(executor) {
-            seen.with { _ = $0.insert(index) }
-            observedThreads.with { $0.append(ThreadID.current) }
-          }
-        }
+/// A thread the test owns, running a `QueueDispatcher` pump with an
+/// attached executor on it: a bound executor that borrows its thread,
+/// unlike the dedicated ones the other tests use.
+private func spawnAttached(_ name: String) -> AttachedHost {
+  let dispatcher = QueueDispatcher()
+  let bootstrap = AttachBootstrap()
+  let thread = Thread {
+    let executor = try! AttachedThreadExecutor.attachOnCurrentThread(to: dispatcher)
+    bootstrap.publish(executor)
+    dispatcher.run()
+  }
+  thread.name = name
+  thread.start()
+  bootstrap.ready.wait()
+  return AttachedHost(executor: bootstrap.executor!, dispatcher: dispatcher)
+}
+
+/// Ends an attached host: the attachment detaches — its finalize runs
+/// through the pump — and the pump's `run()` then returns.
+private func stop(_ host: AttachedHost) async {
+  _ = await detach(host.executor)
+  host.dispatcher.stop()
+}
+
+@Test func jobsRunOnTheInitialBoundThread() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let executor = MigratingThreadExecutor(bound: first)
+  #expect(executor.currentThreadID == first.threadID)
+
+  let threads = await sampleThreads(executor, count: 8)
+  #expect(threads.count == 8)
+  #expect(threads.allSatisfy { $0 == first.threadID })
+
+  await first.shutdown()
+}
+
+@Test func migrationMovesSubsequentJobsToTheNewBoundThread() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
+
+  try await executor.migrate(to: second)
+
+  #expect(executor.currentThreadID == second.threadID)
+  let threads = await sampleThreads(executor, count: 8)
+  #expect(threads.allSatisfy { $0 == second.threadID })
+
+  await first.shutdown()
+  await second.shutdown()
+}
+
+/// The cut, observed at the bound itself: a hand-driven old bound holds
+/// every job until the test permits it, so each report's acceptance is a
+/// signal the test waits for. Two reports sent through the migrating
+/// executor before the migration are served by the old thread; the arrival
+/// of the migration's own barrier at the bound marks the cut, and the two
+/// reports sent after it are served by the new thread.
+@Test func migrationIDsAcrossTheCut() async throws {
+  let oldBound = ManualBound(name: "tae-migrate-first")
+  let newBound = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: oldBound)
+  let oldThread = oldBound.threadID
+
+  func report() -> Task<ThreadID, Never> {
+    Task {
+      await withTaskExecutorPreference(executor) {
+        ThreadID.current
       }
     }
   }
 
-  // Wait until every child was accepted by the old generation. Without
-  // this barrier the runtime may enqueue some children only after the
-  // retarget, which would make the "first record is old" assertion racy.
-  var backlog = executor.pendingJobCount
-  var attempts = 0
-  while backlog < jobCount && attempts < 1_000 {
-    try await Task.sleep(for: .milliseconds(10))
-    backlog = executor.pendingJobCount
-    attempts += 1
-  }
-  guard backlog == jobCount else {
-    releasePump.signal()
-    await blocker.value
-    await executor.terminate()
-    first.stop()
-    second.stop()
-    Issue.record("backlog did not settle: \(backlog) of \(jobCount) jobs queued")
-    return
-  }
+  // Two reports accepted before the cut; nothing runs until permitted.
+  let first = report()
+  await waitForSignal(oldBound.received)
+  let second = report()
+  await waitForSignal(oldBound.received)
 
-  // Start the handoff while the backlog is parked, then release the pump
-  // once the successor's initialize ran: the old generation drains first.
-  let successorReady = DispatchSemaphore(value: 0)
-  let successor = ClosureGenerationDelegate(
-    to: second,
-    initialize: { _ in successorReady.signal() }
-  )
+  // The migration starts. Its barrier arrives at the old bound once routing
+  // has stopped — that hand-over is the cut.
   let migration = Task {
-    try await executor.migrate(to: successor)
+    try await executor.migrate(to: newBound)
   }
-  await waitForSignal(successorReady)
-  releasePump.signal()
-  await blocker.value
-  try await migration.value
-  await producer.value
+  await waitForSignal(oldBound.received)
 
-  #expect(executor.current.epoch == 1)
-  #expect(executor.current.threadID != firstThread)
-  let secondThread = executor.current.threadID
+  // Sent after the cut: it cannot reach the old bound any more.
+  let third = report()
 
-  // Probes after the completed migration pin down the new-generation
-  // suffix of the recorded thread sequence.
-  for _ in 0..<probeCount {
-    await withTaskExecutorPreference(executor) {
-      observedThreads.with { $0.append(ThreadID.current) }
-    }
-  }
-
-  let recorded = observedThreads.get()
-  #expect(seen.get() == Set(0..<jobCount))
-  #expect(recorded.count == jobCount + probeCount)
-  #expect(recorded.first == firstThread)
-  #expect(recorded.last == secondThread)
-  if let handoff = recorded.firstIndex(of: secondThread) {
-    #expect(recorded[..<handoff].allSatisfy { $0 == firstThread })
-    #expect(recorded[handoff...].allSatisfy { $0 == secondThread })
-  } else {
-    Issue.record("migration produced no successor-generation job")
-  }
-
-  await executor.terminate()
-  first.stop()
-  second.stop()
-}
-
-/// The successor pump must stay free while the old generation drains: the
-/// handshake closure returns after `initialize` instead of parking on the
-/// old latch. Under the old gated implementation the marker below cannot
-/// run until the held job releases the old pump.
-@Test func successorPumpIsNotBlockedDuringOldGenerationDrain() async throws {
-  let first = spawnPump("tae-migrate-first")
-  let second = spawnPump("tae-migrate-second")
-  let executor = try await MigratingThreadExecutor.attach(
-    to: ClosureGenerationDelegate(to: first)
-  )
-
-  let holdDrain = DispatchSemaphore(value: 0)
-  let jobStarted = DispatchSemaphore(value: 0)
-  let heldJob = Task {
-    await withTaskExecutorPreference(executor) {
-      jobStarted.signal()
-      blockingWait(holdDrain)
-    }
-  }
-  await waitForSignal(jobStarted)
-  defer { holdDrain.signal() }
-
-  let successorInitialized = DispatchSemaphore(value: 0)
-  let successor = ClosureGenerationDelegate(
-    to: second,
-    initialize: { _ in successorInitialized.signal() }
-  )
-  let migration = Task {
-    try await executor.migrate(to: successor)
-  }
-  await waitForSignal(successorInitialized)
-
-  // The old job still holds the first pump, so the old generation cannot
-  // drain. The successor pump must nevertheless run independent work.
-  let markerRan = DispatchSemaphore(value: 0)
-  _ = second.post { markerRan.signal() }
-  let markerObserved = await waitForSignal(markerRan, timeout: 2)
-  #expect(markerObserved)
-
-  holdDrain.signal()
-  await heldJob.value
+  // The old side drains: the two reports, then the migration's own barrier,
+  // whose release hands the staged report to the new bound.
+  oldBound.permit(3)
   try await migration.value
 
-  await executor.terminate()
-  first.stop()
-  second.stop()
+  // Sent after the release.
+  let fourth = report()
+
+  #expect(await first.value == oldThread)
+  #expect(await second.value == oldThread)
+  #expect(await third.value == newBound.threadID)
+  #expect(await fourth.value == newBound.threadID)
+  #expect(executor.currentThreadID == newBound.threadID)
+
+  await oldBound.stopAndJoin()
+  await newBound.shutdown()
 }
 
-/// A successor pump that rejects the post-handshake serving post must not
-/// leave `terminate()` (or a later migration) waiting for a latch that no
-/// serving loop will ever signal.
-@Test func servingPostRejectionTerminatesInsteadOfHanging() async throws {
-  let first = spawnPump("tae-migrate-first")
-  let executor = try await MigratingThreadExecutor.attach(
-    to: ClosureGenerationDelegate(to: first)
-  )
+/// While a migration is in flight a second one is refused. The hand-driven
+/// old bound receives the migration's own barrier and holds it until
+/// permitted: that hand-over is the in-flight state, observed without
+/// blocking any thread.
+@Test func concurrentMigrationReportsBusy() async throws {
+  let oldBound = ManualBound(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let third = try DedicatedThreadExecutor(name: "tae-migrate-third")
+  let executor = MigratingThreadExecutor(bound: oldBound)
 
-  await #expect(throws: MigrationError.pumpUnavailable) {
-    try await executor.migrate(to: SecondPostRejectedPump())
+  let migration = Task {
+    try await executor.migrate(to: second)
   }
-  await executor.terminate()
-  first.stop()
-}
+  // Routing has stopped by the time the barrier reaches the old bound; it
+  // stays in flight until the barrier runs, and the reported thread is still
+  // the old one.
+  await waitForSignal(oldBound.received)
+  #expect(executor.currentThreadID == oldBound.threadID)
 
-/// First-generation attach shares the same serving-post failure path.
-@Test func attachServingPostRejectionThrows() async {
-  await #expect(throws: MigrationError.pumpUnavailable) {
-    _ = try await MigratingThreadExecutor.attach(to: SecondPostRejectedPump())
+  await #expect(throws: MigrationError.busy) {
+    try await executor.migrate(to: third)
   }
+
+  oldBound.permit(1)
+  try await migration.value
+  #expect(executor.currentThreadID == second.threadID)
+
+  // Once the first completed, a later migration proceeds.
+  try await executor.migrate(to: third)
+  #expect(executor.currentThreadID == third.threadID)
+
+  await oldBound.stopAndJoin()
+  await second.shutdown()
+  await third.shutdown()
 }
 
-/// A rejected handshake post fails attach instead of leaving it suspended.
-@Test func attachThrowsWhenPumpRejectsHandshake() async {
-  await #expect(throws: MigrationError.pumpUnavailable) {
-    _ = try await MigratingThreadExecutor.attach(to: ClosedPump())
+/// Awaiting `migrate` from a task bound to the executor is safe: the
+/// caller resumes on the new bound thread, behind the released jobs.
+@Test func migrateAwaitedFromOnExecutorContextResumesOnTheNewThread() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
+  let threads = TestBox<[ThreadID]>([])
+
+  try await withTaskExecutorPreference(executor) {
+    threads.with { $0.append(ThreadID.current) }
+    try await executor.migrate(to: second)
+    threads.with { $0.append(ThreadID.current) }
   }
+
+  #expect(threads.get() == [first.threadID, second.threadID])
+
+  await first.shutdown()
+  await second.shutdown()
 }
 
-/// A rejected migration handshake keeps the current generation serving.
-@Test func migrateHandshakeRejectionKeepsCurrentGenerationServing() async throws {
-  let first = spawnPump("tae-migrate-first")
-  let executor = try await MigratingThreadExecutor.attach(
-    to: ClosureGenerationDelegate(to: first)
-  )
-
-  await #expect(throws: MigrationError.pumpUnavailable) {
-    try await executor.migrate(to: ClosedPump())
-  }
-  #expect(executor.current.epoch == 0)
-  let stillServing = await withTaskExecutorPreference(executor) { ThreadID.current }
-  #expect(stillServing == executor.current.threadID)
-
-  await executor.terminate()
-  first.stop()
-}
-
-/// An actor bound to the executor survives migration transparently: no
-/// rebinding, state continuity, jobs on the new thread.
-@Test func actorSurvivesMigrationTransparently() async throws {
-  let first = spawnPump("tae-migrate-first")
-  let second = spawnPump("tae-migrate-second")
-  let executor = try await MigratingThreadExecutor.attach(
-    to: ClosureGenerationDelegate(to: first)
-  )
+@Test func actorBoundToTheExecutorSurvivesMigration() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
   let counter = MigrationCounter(executor: executor)
 
   #expect(await counter.next() == 1)
   let before = await counter.threadID()
+  #expect(before == first.threadID)
 
-  try await executor.migrate(to: ClosureGenerationDelegate(to: second))
+  try await executor.migrate(to: second)
 
   #expect(await counter.next() == 2)
   let after = await counter.threadID()
-  #expect(after != before)
-  #expect(after == executor.current.threadID)
+  #expect(after == second.threadID)
 
-  await executor.terminate()
-  first.stop()
-  second.stop()
+  await first.shutdown()
+  await second.shutdown()
 }
 
-/// Per-generation hooks run on their threads in the transactional order:
-/// initialize(1) precedes finalize(0) — the successor is prepared before
-/// the predecessor seals, so failure leaves the old generation serving.
-@Test func generationHooksRunPerGenerationInTransactionalOrder() async throws {
-  let first = spawnPump("tae-migrate-first")
-  let second = spawnPump("tae-migrate-second")
-  let events = TestBox<[String]>([])
-  let executor = try await MigratingThreadExecutor.attach(
-    to: RecordingPump(pump: first, events: events)
-  )
+/// Synchronous `assumeIsolated` entry from the current thread. The job runs
+/// as the bound executor while the counter names the migrating executor, so
+/// the identities never match and only the thread-based check accepts it.
+@Test func assumeIsolatedFromTheCurrentThreadIsAccepted() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
+  let counter = MigrationCounter(executor: executor)
 
-  await withTaskExecutorPreference(executor) {}
-  try await executor.migrate(to: RecordingPump(pump: second, events: events))
-  await withTaskExecutorPreference(executor) {}
-  await executor.terminate()
-
-  let recorded = events.get()
-  #expect(recorded.count == 4)
-  #expect(recorded[0].hasPrefix("initialize(0)@"))
-  #expect(recorded[1].hasPrefix("initialize(1)@"))
-  #expect(recorded[2].hasPrefix("finalize(0)@"))
-  #expect(recorded[3].hasPrefix("finalize(1)@"))
-  #expect(
-    recorded[0].dropFirst("initialize(0)@".count) == recorded[2].dropFirst("finalize(0)@".count))
-  #expect(
-    recorded[1].dropFirst("initialize(1)@".count) == recorded[3].dropFirst("finalize(1)@".count))
-
-  first.stop()
-  second.stop()
-}
-
-/// A successor initialize failure aborts the migration transactionally:
-/// the error rethrows, the current generation keeps serving, and a later
-/// migration to the same pump succeeds.
-@Test func successorInitializeFailureAbortsMigration() async throws {
-  let first = spawnPump("tae-migrate-first")
-  let second = spawnPump("tae-migrate-second")
-  let failEpoch = TestBox<Int?>(nil)
-  let executor = try await MigratingThreadExecutor.attach(
-    to: RecordingPump(pump: first, failEpoch: failEpoch)
-  )
-
-  failEpoch.set(1)
-  await #expect(throws: MigrationSetupFailed.self) {
-    try await executor.migrate(to: RecordingPump(pump: second, failEpoch: failEpoch))
+  let viaMigrating = await withTaskExecutorPreference(executor) {
+    nextAssumingIsolated(counter)
   }
-  #expect(executor.current.epoch == 0)
-  let stillServing = await withTaskExecutorPreference(executor) { ThreadID.current }
-  #expect(stillServing == executor.current.threadID)
+  #expect(viaMigrating == 1)
 
-  failEpoch.set(nil)
-  try await executor.migrate(to: RecordingPump(pump: second, failEpoch: failEpoch))
-  #expect(executor.current.epoch == 1)
+  // Straight onto the bound executor: a different identity, same thread.
+  let viaBound = await withTaskExecutorPreference(first) {
+    nextAssumingIsolated(counter)
+  }
+  #expect(viaBound == 2)
 
-  await executor.terminate()
-  first.stop()
-  second.stop()
+  try await executor.migrate(to: second)
+
+  let viaNewBound = await withTaskExecutorPreference(second) {
+    nextAssumingIsolated(counter)
+  }
+  #expect(viaNewBound == 3)
+
+  await first.shutdown()
+  await second.shutdown()
 }
 
-/// `handOver` from inside a job: the calling job completes first, the
-/// generation seals, the successor takes over; later jobs run on it.
-@Test func handOverFromJobSealsAfterJobCompletes() async throws {
-  let first = spawnPump("tae-migrate-first")
-  let second = spawnPump("tae-migrate-second")
-  let executor = try await MigratingThreadExecutor.attach(
-    to: ClosureGenerationDelegate(to: first)
-  )
-  let order = TestBox<[String]>([])
+/// The isolation check follows the current thread: positive from a job on
+/// it, negative anywhere else, and it moves with a migration.
+@Test func isolationChecksFollowTheCurrentThread() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
 
-  await withTaskExecutorPreference(executor) {
-    order.with { $0.append("job") }
-    executor.handOver(to: ClosureGenerationDelegate(to: second))
+  #expect(executor.isIsolatingCurrentContext() == false)
+  let onFirst = await withTaskExecutorPreference(executor) {
+    executor.isIsolatingCurrentContext()
   }
+  #expect(onFirst == true)
 
-  var attempts = 200
-  while executor.current.epoch != 1 && attempts > 0 {
-    try await Task.sleep(for: .milliseconds(10))
-    attempts -= 1
+  try await executor.migrate(to: second)
+
+  #expect(executor.isIsolatingCurrentContext() == false)
+  let onSecond = await withTaskExecutorPreference(executor) {
+    executor.isIsolatingCurrentContext()
   }
-  #expect(executor.current.epoch == 1)
+  #expect(onSecond == true)
 
-  let after = await withTaskExecutorPreference(executor) { ThreadID.current }
-  #expect(after == executor.current.threadID)
-  #expect(order.get() == ["job"])
-
-  await executor.terminate()
-  first.stop()
-  second.stop()
+  await first.shutdown()
+  await second.shutdown()
 }
 
-/// `terminate()` drains, runs the generation's finalize on its thread,
-/// drops later enqueues, and is idempotent.
-@Test func terminateDrainsFinalizesAndDrops() async throws {
-  let first = spawnPump("tae-migrate-first")
-  let events = TestBox<[String]>([])
-  let executor = try await MigratingThreadExecutor.attach(
-    to: RecordingPump(pump: first, events: events)
-  )
+/// A task suspended when the cut passes resumes on the new bound thread.
+@Test func tasksSuspendedAcrossTheCutResumeOnTheNewThread() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
+  let gate = DispatchSemaphore(value: 0)
+  let threads = TestBox<[ThreadID]>([])
 
-  await withTaskExecutorPreference(executor) {}
-  await executor.terminate()
-  await executor.terminate()
-
-  let recorded = events.get()
-  #expect(recorded.count == 2)
-  #expect(recorded[0].hasPrefix("initialize(0)@"))
-  #expect(recorded[1].hasPrefix("finalize(0)@"))
-
-  let ran = TestBox(0)
-  Task.detached {
+  let running = DispatchSemaphore(value: 0)
+  let suspended = Task {
     await withTaskExecutorPreference(executor) {
-      ran.with { $0 += 1 }
+      threads.with { $0.append(ThreadID.current) }
+      running.signal()
+      await waitForSignal(gate)
+      threads.with { $0.append(ThreadID.current) }
     }
   }
-  try await Task.sleep(for: .milliseconds(100))
-  #expect(ran.get() == 0)
+  await waitForSignal(running)
 
-  first.stop()
+  try await executor.migrate(to: second)
+  gate.signal()
+  await suspended.value
+
+  #expect(threads.get() == [first.threadID, second.threadID])
+
+  await first.shutdown()
+  await second.shutdown()
 }
 
-/// Awaiting `migrate()` from a task bound to this executor is safe: the
-/// ceremony runs detached and the caller resumes on the new generation —
-/// an in-caller ceremony would deadlock because the caller's resumption is
-/// queued behind the old generation's drain.
-@Test func migrateAwaitedFromOnExecutorContextCompletes() async throws {
-  let first = spawnPump("tae-migrate-first")
-  let second = spawnPump("tae-migrate-second")
-  let executor = try await MigratingThreadExecutor.attach(
-    to: ClosureGenerationDelegate(to: first)
-  )
+/// Structured child tasks inherit the executor they were created under and
+/// follow a migration: started before the cut, resumed after it. So does an
+/// unstructured task spawned from actor-isolated code whose body uses the
+/// actor — it is an actor job and takes the actor's executor.
+@Test func structuredChildrenAndActorSpawnedTasksFollowMigration() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
+  let counter = MigrationCounter(executor: executor)
+  let gate = DispatchSemaphore(value: 0)
+  let running = DispatchSemaphore(value: 0)
+  let done = DispatchSemaphore(value: 0)
+  let threads = TestBox<[ThreadID]>([])
+  let created = 8
 
-  try await withTaskExecutorPreference(executor) {
-    try await executor.migrate(to: ClosureGenerationDelegate(to: second))
+  let parent = Task {
+    await withTaskExecutorPreference(executor) {
+      await withTaskGroup(of: Void.self) { group in
+        for _ in 0..<created {
+          group.addTask {
+            threads.with { $0.append(ThreadID.current) }
+            running.signal()
+            await waitForSignal(gate)
+            threads.with { $0.append(ThreadID.current) }
+            done.signal()
+          }
+        }
+      }
+    }
+  }
+  for _ in 0..<created {
+    await counter.spawnFollower(gate: gate, running: running, done: done, threads: threads)
+  }
+  for _ in 0..<(2 * created) {
+    await waitForSignal(running)
   }
 
-  #expect(executor.current.epoch == 1)
-  let after = await withTaskExecutorPreference(executor) { ThreadID.current }
-  #expect(after == executor.current.threadID)
+  try await executor.migrate(to: second)
+  for _ in 0..<(2 * created) {
+    gate.signal()
+  }
+  await parent.value
+  for _ in 0..<(2 * created) {
+    await waitForSignal(done)
+  }
 
-  await executor.terminate()
-  first.stop()
-  second.stop()
+  let before = Array(repeating: first.threadID, count: 2 * created)
+  let after = Array(repeating: second.threadID, count: 2 * created)
+  #expect(threads.get() == before + after)
+
+  await first.shutdown()
+  await second.shutdown()
+}
+
+/// `async let` children, like task-group children, inherit the executor they
+/// were created under and follow a migration.
+@Test func asyncLetChildrenFollowMigration() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
+  let gate = DispatchSemaphore(value: 0)
+  let running = DispatchSemaphore(value: 0)
+  let threads = TestBox<[ThreadID]>([])
+
+  try await withTaskExecutorPreference(executor) {
+    async let left = recordAcross(gate: gate, running: running, threads: threads)
+    async let right = recordAcross(gate: gate, running: running, threads: threads)
+    await waitForSignal(running)
+    await waitForSignal(running)
+
+    try await executor.migrate(to: second)
+    gate.signal()
+    gate.signal()
+    _ = await (left, right)
+  }
+
+  let observed = threads.get()
+  #expect(observed.count == 4)
+  #expect(observed.prefix(2).allSatisfy { $0 == first.threadID })
+  #expect(observed.suffix(2).allSatisfy { $0 == second.threadID })
+
+  await first.shutdown()
+  await second.shutdown()
+}
+
+/// Nested scopes do not strand work on the old thread: a task suspended
+/// inside an inner `withTaskExecutorPreference` scope resumes on the new
+/// bound thread, and so does everything up to the end of the outer scope.
+/// After the outer scope the task is back on the executor it had before.
+@Test func nestedScopesFollowMigration() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
+  let threads = TestBox<[ThreadID]>([])
+  let gate = DispatchSemaphore(value: 0)
+  let inInner = DispatchSemaphore(value: 0)
+
+  let task = Task {
+    await withTaskExecutorPreference(executor) {
+      threads.with { $0.append(ThreadID.current) }
+      await withTaskExecutorPreference(executor) {
+        threads.with { $0.append(ThreadID.current) }
+        inInner.signal()
+        await waitForSignal(gate)
+        threads.with { $0.append(ThreadID.current) }
+      }
+      threads.with { $0.append(ThreadID.current) }
+      await Task.yield()
+      threads.with { $0.append(ThreadID.current) }
+    }
+    threads.with { $0.append(ThreadID.current) }
+  }
+  await waitForSignal(inInner)
+  try await executor.migrate(to: second)
+  gate.signal()
+  await task.value
+
+  // Outer start, inner start; inner resumed, inner left, yielded; scope left.
+  let observed = threads.get()
+  #expect(observed.count == 6)
+  #expect(observed.prefix(2).allSatisfy { $0 == first.threadID })
+  #expect(observed.dropFirst(2).prefix(3).allSatisfy { $0 == second.threadID })
+  let afterScope = observed.last
+  #expect(afterScope != first.threadID && afterScope != second.threadID)
+
+  await first.shutdown()
+  await second.shutdown()
+}
+
+/// An unstructured `Task` whose body needs neither the executor nor an
+/// actor inherits neither: Swift leaves it on the default executor, before
+/// and after a migration — whether created in a plain job under the
+/// executor's preference or from an actor method whose state it does not
+/// touch. Structured children, tasks that are actor jobs, or an explicit
+/// `withTaskExecutorPreference` are what follow the executor.
+@Test func unstructuredTasksDoNotInheritTheExecutor() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
+  let counter = MigrationCounter(executor: executor)
+  let created = 8
+
+  // Each task reports the thread it started on and shares nothing.
+  var bystanders: [Task<ThreadID, Never>] = []
+  await withTaskExecutorPreference(executor) {
+    for _ in 0..<created {
+      bystanders.append(Task { ThreadID.current })
+    }
+  }
+  for _ in 0..<created {
+    bystanders.append(await counter.spawnBystander())
+  }
+  try await executor.migrate(to: second)
+
+  var observed: [ThreadID] = []
+  for bystander in bystanders {
+    observed.append(await bystander.value)
+  }
+  #expect(observed.count == 2 * created)
+  #expect(observed.allSatisfy { $0 != first.threadID && $0 != second.threadID })
+
+  await first.shutdown()
+  await second.shutdown()
+}
+
+/// Stress: producers race the migration, and the recorded thread sequence is
+/// still all-old-thread then all-new-thread. The boundary itself is pinned
+/// deterministically by `migrationIDsAcrossTheCut`; here both sides are kept
+/// non-empty by the awaited pre-cut job and the post-release sample.
+@Test func jobsSerializeAcrossTheCutUnderRacingProducers() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
+  let threads = TestBox<[ThreadID]>([])
+  let racing = 200
+
+  let preCut = await withTaskExecutorPreference(executor) {
+    ThreadID.current
+  }
+  #expect(preCut == first.threadID)
+
+  // The producers begin on the old side of the cut and keep submitting
+  // across it.
+  let producers = Task {
+    await withTaskGroup(of: Void.self) { group in
+      for _ in 0..<racing {
+        group.addTask {
+          await withTaskExecutorPreference(executor) {
+            threads.with { $0.append(ThreadID.current) }
+          }
+        }
+      }
+    }
+  }
+  try await executor.migrate(to: second)
+  await producers.value
+  let sampled = await sampleThreads(executor, count: 8)
+
+  let sequence = [preCut] + threads.get() + sampled
+  #expect(sequence.count == 1 + racing + 8)
+  let cut = sequence.firstIndex(where: { $0 != first.threadID })
+  #expect(cut != nil)
+  if let cut {
+    #expect(cut >= 1)
+    #expect(sequence[..<cut].allSatisfy { $0 == first.threadID })
+    #expect(sequence[cut...].allSatisfy { $0 == second.threadID })
+  }
+
+  await first.shutdown()
+  await second.shutdown()
+}
+
+/// The barrier belongs to the old bound executor, not to the migrating
+/// executor: it waits behind another client's job on the same executor.
+@Test func migrationWaitsForTheBoundExecutorsOwnBacklog() async throws {
+  let oldBound = ManualBound(name: "tae-migrate-first")
+  let newBound = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: oldBound)
+  let order = TestBox<[String]>([])
+  let hold = DispatchSemaphore(value: 0)
+  let held = DispatchSemaphore(value: 0)
+
+  // Another client of the old bound runs a job that holds its thread.
+  Task {
+    await withTaskExecutorPreference(oldBound) {
+      held.signal()
+      blockingWait(hold)
+      order.with { $0.append("other client done") }
+    }
+  }
+  await waitForSignal(oldBound.received)
+  oldBound.permit(1)
+  await waitForSignal(held)
+
+  // The migration's barrier queues behind that job: releasing the job is
+  // what lets the migration finish.
+  let migration = Task {
+    try await executor.migrate(to: newBound)
+    order.with { $0.append("migration done") }
+  }
+  await waitForSignal(oldBound.received)
+  #expect(order.get().isEmpty)
+
+  hold.signal()
+  oldBound.permit(1)  // run the barrier
+  try await migration.value
+  #expect(order.get() == ["other client done", "migration done"])
+  #expect(executor.currentThreadID == newBound.threadID)
+
+  await oldBound.stopAndJoin()
+  await newBound.shutdown()
+}
+
+/// A new bound executor that already stopped accepts the release silently:
+/// the migration still returns, with the staged jobs discarded.
+@Test func migratingToAStoppedBoundReturns() async throws {
+  let oldBound = ManualBound(name: "tae-migrate-first")
+  let stopped = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  await stopped.shutdown()
+  let executor = MigratingThreadExecutor(bound: oldBound)
+
+  let migration = Task {
+    try await executor.migrate(to: stopped)
+  }
+  await waitForSignal(oldBound.received)
+  oldBound.permit(1)
+  try await migration.value
+  #expect(executor.currentThreadID == stopped.threadID)
+
+  await oldBound.stopAndJoin()
+}
+
+/// Bound executors are borrowed: one migrating executor leaving does not
+/// disturb another on the same bound executor, and two can converge on one.
+@Test func migrationLeavesTheOldBoundExecutorServing() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let departing = MigratingThreadExecutor(bound: first)
+  let staying = MigratingThreadExecutor(bound: first)
+
+  try await departing.migrate(to: second)
+
+  let stayingThreads = await sampleThreads(staying, count: 8)
+  #expect(stayingThreads.allSatisfy { $0 == first.threadID })
+
+  try await staying.migrate(to: second)
+  async let departingThreads = sampleThreads(departing, count: 8)
+  async let convergedThreads = sampleThreads(staying, count: 8)
+  let (left, right) = await (departingThreads, convergedThreads)
+  #expect((left + right).allSatisfy { $0 == second.threadID })
+
+  await first.shutdown()
+  await second.shutdown()
+}
+
+/// A bound executor need not own its thread: attached executors on borrowed
+/// pump threads serve on either side of a migration, and the one left behind
+/// stays attached to its own clients.
+@Test func migrationMovesBetweenAttachedExecutors() async throws {
+  let first = spawnAttached("tae-migrate-first")
+  let second = spawnAttached("tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first.executor)
+  #expect(executor.currentThreadID == first.executor.threadID)
+
+  let before = await sampleThreads(executor, count: 8)
+  #expect(before.allSatisfy { $0 == first.executor.threadID })
+
+  try await executor.migrate(to: second.executor)
+
+  #expect(executor.currentThreadID == second.executor.threadID)
+  let after = await sampleThreads(executor, count: 8)
+  #expect(after.allSatisfy { $0 == second.executor.threadID })
+
+  // The attachment left behind still serves its own clients.
+  let direct = await withTaskExecutorPreference(first.executor) {
+    ThreadID.current
+  }
+  #expect(direct == first.executor.threadID)
+
+  await stop(first)
+  await stop(second)
+}
+
+/// Migrating to the executor already in place is a plain barrier: the
+/// accepted backlog completes, then serving continues on the same thread.
+@Test func migratingToTheCurrentBoundExecutorQuiesces() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let executor = MigratingThreadExecutor(bound: first)
+
+  try await executor.migrate(to: first)
+
+  #expect(executor.currentThreadID == first.threadID)
+  let threads = await sampleThreads(executor, count: 8)
+  #expect(threads.allSatisfy { $0 == first.threadID })
+
+  await first.shutdown()
+}
+
+@Test func bothExecutorFamiliesAreThreadAffinityExecutors() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let executor = MigratingThreadExecutor(bound: first)
+  let executors: [any ThreadAffinityExecutor] = [first, executor]
+
+  #expect(executors.map { $0.currentThreadID } == [first.threadID, first.threadID])
+
+  await first.shutdown()
 }

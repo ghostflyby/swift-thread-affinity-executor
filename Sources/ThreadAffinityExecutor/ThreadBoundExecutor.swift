@@ -12,12 +12,15 @@
 ///
 /// 1. **Unique thread** — all jobs run on the same OS thread from the moment
 ///    the executor becomes available until it leaves its effective lifetime.
-/// 2. **Stable identity** — `threadID` never changes after publication;
-///    migrating to another thread means retiring this executor instance.
+/// 2. **Stable identity** — `threadID` never changes after publication. A
+///    bound executor never migrates: work moves to another thread only by
+///    being routed through a different executor, as
+///    `MigratingThreadExecutor` does.
 /// 3. **Real submission** — `enqueue` is safe from any thread and the job is
 ///    eventually handed to the bound thread.
 /// 4. **Serialization** — jobs obey `SerialExecutor` mutual exclusion and
-///    ordering; no two jobs run concurrently.
+///    run in acceptance order (`SerialExecutor` alone permits reordering);
+///    no two jobs run concurrently.
 /// 5. **Synchronous isolation correctness** — any synchronous call observing
 ///    `isIsolatingCurrentContext() == true` is properly ordered with the
 ///    executor's jobs; adapters must audit nested-loop re-entrancy.
@@ -27,24 +30,15 @@
 ///    jobs arriving after the termination request — is the sole exception.
 /// 7. **Lifetime validity** — while tasks or actors may still submit jobs,
 ///    the bound thread and the scheduling channel remain usable.
-public protocol ThreadBoundExecutor: SerialExecutor, TaskExecutor {
+public protocol ThreadBoundExecutor: ThreadAffinityExecutor {
   /// The OS thread this executor is bound to. Stable after publication.
   var threadID: ThreadID { get }
 }
 
 extension ThreadBoundExecutor {
-  /// Dynamic isolation check consumed by the Swift 6.4+ runtime after
-  /// regular executor-identity comparison fails.
-  ///
-  /// A synchronous caller running on the bound thread is isolated with
-  /// respect to this executor's jobs. Because the check inspects the
-  /// calling thread, it also holds when a *different* `ThreadBoundExecutor`
-  /// object is bound to the same OS thread.
-  ///
-  /// The package requires Swift 6.4, so the requirement is available on
-  /// every supported platform.
-  public func isIsolatingCurrentContext() -> Bool? {
-    threadID == ThreadID.current
+  /// The binding never changes: the current thread is the bound thread.
+  public var currentThreadID: ThreadID {
+    threadID
   }
 
   /// Runs a job on the calling thread. The executor's scheduling already

@@ -58,7 +58,7 @@ actor Counter {
   #expect(await counter.next() == 1)
   #expect(await counter.next() == 2)
 
-  await shutdown(counter.executor)
+  await counter.executor.shutdown()
 }
 
 /// After suspension and resumption the actor
@@ -70,7 +70,7 @@ actor Counter {
 
   #expect(await counter.hopAwayAndComeBack())
 
-  await shutdown(counter.executor)
+  await counter.executor.shutdown()
 }
 
 /// Second actor sharing the same dedicated executor (one executor may
@@ -109,5 +109,5 @@ actor Sibling {
   let result = await sibling.syncAccessCounter()
 
   #expect(result == 1)
-  await shutdown(counter.executor)
+  await counter.executor.shutdown()
 }
