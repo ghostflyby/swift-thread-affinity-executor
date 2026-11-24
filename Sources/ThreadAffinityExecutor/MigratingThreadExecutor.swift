@@ -10,8 +10,10 @@ import Synchronization
 
 /// Migration failures.
 public enum MigrationError: Error, Sendable, Equatable {
-  /// Another migration is in flight; nothing changed, retry once it
-  /// completed.
+  /// Another migration is in flight; nothing changed. Retry after it
+  /// completed — which never happens if the old bound executor stopped
+  /// servicing and left the migration pending (see
+  /// `MigratingThreadExecutor`).
   case busy
 }
 
@@ -82,8 +84,8 @@ public final class MigratingThreadExecutor: ThreadAffinityExecutor {
   private struct Routing {
     /// The bound executor direct submissions go to.
     var target: any ThreadBoundExecutor
-    /// The thread reported through `Affinity`. Switches when the barrier
-    /// ran, not when routing stopped.
+    /// The thread reported through `ThreadAffinityExecutor`. Switches when
+    /// the barrier ran, not when routing stopped.
     var publishedThreadID: ThreadID
     /// Non-nil while a migration is in flight: the jobs accepted since
     /// routing stopped, in acceptance order.
@@ -155,28 +157,17 @@ public final class MigratingThreadExecutor: ThreadAffinityExecutor {
     let newThreadID = newBound.threadID
     routing.withLock { $0.publishedThreadID = newThreadID }
 
-    while true {
-      let batch = routing.withLock { routing -> [UnownedJob] in
-        let batch = routing.staged ?? []
-        routing.staged?.removeAll(keepingCapacity: true)
-        return batch
-      }
-      for job in batch {
+    // One critical section: take the whole staging set, hand it over, and
+    // turn routing direct. A job arriving meanwhile waits for the lock and
+    // then goes direct, behind the released batch, so the release is bounded
+    // by the staged jobs alone — a producer that keeps arriving cannot keep
+    // the migration from settling.
+    routing.withLock { routing in
+      for job in routing.staged ?? [] {
         newBound.enqueue(ExecutorJob(job))
       }
-      // Routing turns direct only once nothing is left behind, so a job that
-      // arrived meanwhile is released ahead of anything newer.
-      let settled = routing.withLock { routing -> Bool in
-        guard let staged = routing.staged, staged.isEmpty else {
-          return false
-        }
-        routing.staged = nil
-        routing.target = newBound
-        return true
-      }
-      if settled {
-        return
-      }
+      routing.staged = nil
+      routing.target = newBound
     }
   }
 }

@@ -330,8 +330,10 @@ private func stop(_ host: AttachedHost) async {
     try await executor.migrate(to: second)
   }
   // Routing has stopped by the time the barrier reaches the old bound; it
-  // stays in flight until the barrier runs.
+  // stays in flight until the barrier runs, and the reported thread is still
+  // the old one.
   await waitForSignal(oldBound.received)
+  #expect(executor.currentThreadID == oldBound.threadID)
 
   await #expect(throws: MigrationError.busy) {
     try await executor.migrate(to: third)
@@ -640,10 +642,10 @@ private func stop(_ host: AttachedHost) async {
   await second.shutdown()
 }
 
-/// Producers racing the migration: a job lands on either side of the cut,
-/// but execution is still all-old-thread, then all-new-thread. A job before
-/// the cut is awaited and a sample after it is taken, so neither half of the
-/// check can be empty.
+/// Stress: producers race the migration, and the recorded thread sequence is
+/// still all-old-thread then all-new-thread. The boundary itself is pinned
+/// deterministically by `migrationIDsAcrossTheCut`; here both sides are kept
+/// non-empty by the awaited pre-cut job and the post-release sample.
 @Test func jobsSerializeAcrossTheCutUnderRacingProducers() async throws {
   let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
   let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
@@ -690,42 +692,61 @@ private func stop(_ host: AttachedHost) async {
 /// The barrier belongs to the old bound executor, not to the migrating
 /// executor: it waits behind another client's job on the same executor.
 @Test func migrationWaitsForTheBoundExecutorsOwnBacklog() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
-  let executor = MigratingThreadExecutor(bound: first)
+  let oldBound = ManualBound(name: "tae-migrate-first")
+  let newBound = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: oldBound)
   let order = TestBox<[String]>([])
-
-  // Another client of the first executor holds its thread.
   let hold = DispatchSemaphore(value: 0)
   let held = DispatchSemaphore(value: 0)
-  let otherClient = Task {
-    await withTaskExecutorPreference(first) {
+
+  // Another client of the old bound runs a job that holds its thread.
+  Task {
+    await withTaskExecutorPreference(oldBound) {
       held.signal()
       blockingWait(hold)
       order.with { $0.append("other client done") }
     }
   }
+  await waitForSignal(oldBound.received)
+  oldBound.permit(1)
   await waitForSignal(held)
-  defer { hold.signal() }
 
+  // The migration's barrier queues behind that job: releasing the job is
+  // what lets the migration finish.
   let migration = Task {
-    try await executor.migrate(to: second)
+    try await executor.migrate(to: newBound)
     order.with { $0.append("migration done") }
   }
-
-  // The migration's barrier is queued behind the other client's job, so the
-  // migration cannot complete while that job holds the thread.
-  try await Task.sleep(for: .milliseconds(100))
+  await waitForSignal(oldBound.received)
   #expect(order.get().isEmpty)
 
   hold.signal()
-  await otherClient.value
+  oldBound.permit(1)  // run the barrier
   try await migration.value
   #expect(order.get() == ["other client done", "migration done"])
-  #expect(executor.currentThreadID == second.threadID)
+  #expect(executor.currentThreadID == newBound.threadID)
 
-  await first.shutdown()
-  await second.shutdown()
+  await oldBound.stopAndJoin()
+  await newBound.shutdown()
+}
+
+/// A new bound executor that already stopped accepts the release silently:
+/// the migration still returns, with the staged jobs discarded.
+@Test func migratingToAStoppedBoundReturns() async throws {
+  let oldBound = ManualBound(name: "tae-migrate-first")
+  let stopped = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  await stopped.shutdown()
+  let executor = MigratingThreadExecutor(bound: oldBound)
+
+  let migration = Task {
+    try await executor.migrate(to: stopped)
+  }
+  await waitForSignal(oldBound.received)
+  oldBound.permit(1)
+  try await migration.value
+  #expect(executor.currentThreadID == stopped.threadID)
+
+  await oldBound.stopAndJoin()
 }
 
 /// Bound executors are borrowed: one migrating executor leaving does not
@@ -794,7 +815,7 @@ private func stop(_ host: AttachedHost) async {
   await first.shutdown()
 }
 
-@Test func bothExecutorFamiliesAreAffinity() async throws {
+@Test func bothExecutorFamiliesAreThreadAffinityExecutors() async throws {
   let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
   let executor = MigratingThreadExecutor(bound: first)
   let executors: [any ThreadAffinityExecutor] = [first, executor]

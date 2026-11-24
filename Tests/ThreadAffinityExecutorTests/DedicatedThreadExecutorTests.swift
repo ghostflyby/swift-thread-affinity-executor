@@ -196,32 +196,69 @@ private struct InitializationFailed: Error {}
   #expect(executor.hasFinished)
 }
 
-/// The async shutdown suspends instead of blocking: concurrent callers all
-/// resume only after the queue drained, `finalize` ran on the bound thread
-/// and the worker exited.
-@Test func asyncShutdownWaitsForExit() async throws {
-  let finalThread = TestBox<ThreadID?>(nil)
+/// The async shutdown resumes only after the exit epilogue: `finalize`
+/// blocks on a gate, and the shutdown task has not returned while it is
+/// held. A second call after the exit resolves immediately.
+@Test func asyncShutdownResumesOnlyAfterExit() async throws {
+  let finalizeStarted = DispatchSemaphore(value: 0)
+  let finalizeRelease = DispatchSemaphore(value: 0)
+  let finalizeDone = TestBox(false)
   let executor = try DedicatedThreadExecutor(
     name: "tae-async-shutdown",
     lifecycle: ClosureLifecycle(
-      finalize: { finalThread.set(ThreadID.current) }
+      finalize: {
+        finalizeStarted.signal()
+        finalizeRelease.wait()
+        finalizeDone.set(true)
+      }
     )
   )
-  let counter = ThreadSafeCounter()
-
-  await withTaskExecutorPreference(executor) {
-    counter.increment(recording: TestBox<Set<ThreadID>>([]))
+  let returned = TestBox(false)
+  let shutdown = Task {
+    await executor.shutdown()
+    returned.set(true)
   }
 
-  await withTaskGroup(of: Void.self) { group in
-    for _ in 0..<4 {
-      group.addTask {
-        await executor.shutdown()
-      }
-    }
-  }
+  await waitForSignal(finalizeStarted)
+  // finalize is running and held: the caller must not have resumed.
+  #expect(returned.get() == false)
 
-  #expect(counter.value == 1)
-  #expect(finalThread.get() == executor.threadID)
+  finalizeRelease.signal()
+  await shutdown.value
+  #expect(returned.get())
+  #expect(finalizeDone.get())
   #expect(executor.hasFinished)
+
+  // After the exit the wait resolves immediately.
+  await executor.shutdown()
+}
+
+/// The async shutdown does not respond to cancellation: a cancelled caller
+/// still resumes, normally, once the exit epilogue completed.
+@Test func asyncShutdownDoesNotRespondToCancellation() async throws {
+  let finalizeStarted = DispatchSemaphore(value: 0)
+  let finalizeRelease = DispatchSemaphore(value: 0)
+  let executor = try DedicatedThreadExecutor(
+    name: "tae-async-cancel",
+    lifecycle: ClosureLifecycle(
+      finalize: {
+        finalizeStarted.signal()
+        finalizeRelease.wait()
+      }
+    )
+  )
+  let returned = TestBox(false)
+  let shutdown = Task {
+    await executor.shutdown()
+    returned.set(true)
+  }
+
+  await waitForSignal(finalizeStarted)
+  shutdown.cancel()
+  #expect(shutdown.isCancelled)
+  #expect(returned.get() == false)
+
+  finalizeRelease.signal()
+  await shutdown.value
+  #expect(returned.get())
 }

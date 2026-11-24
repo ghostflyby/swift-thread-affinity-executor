@@ -1,5 +1,5 @@
 //
-//  Affinity.swift
+//  ThreadAffinityExecutor.swift
 //  ThreadAffinityExecutor
 //
 //  The common type of the two executor families: at any moment, every job

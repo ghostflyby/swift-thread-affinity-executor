@@ -9,8 +9,8 @@ Thread-affinity executors for Swift Concurrency: at any moment, every job accept
 | `BlockingQueue` (separate library product) | Split-endpoint FIFO queues: `UnboundedQueue` (grows) and `BoundedQueue` (fixed capacity); shape chosen by `split(.spsc)` / `.mpsc` / `.spmc` / `.mpmc`; elements cross by ownership (`sending`) | ✅ |
 | `LinkedQueue` (in `BlockingQueue`) | Unbounded MPSC queue; `split(.mpsc)` (cloneable producer) or `split(.spsc)` (move-only producer) | ✅ |
 | `ThreadID` | Cross-platform OS thread ID value type | ✅ |
-| `Affinity` | Common protocol of the executor families: jobs run on one known OS thread at any moment (`currentThreadID`) | ✅ |
-| `ThreadBoundExecutor` | `Affinity` bound to one OS thread for its whole lifetime (`SerialExecutor + TaskExecutor`) | ✅ |
+| `ThreadAffinityExecutor` | Common protocol of the executor families: jobs run on one known OS thread at any moment (`currentThreadID`) | ✅ |
+| `ThreadBoundExecutor` | `ThreadAffinityExecutor` bound to one OS thread for its whole lifetime (`SerialExecutor + TaskExecutor`) | ✅ |
 | `DedicatedThreadExecutor` | Dedicated OS thread with optional on-thread `initialize`/`finalize` | ✅ |
 | `AttachedThreadExecutor` + `FixedThreadDispatcher` | Attach to any fixed thread with a `post` entry (main queue via `MainQueueDispatcher`, run loops, event loops); `detach()` terminates | ✅ |
 | `QueueDispatcher` | Pump for threads without an event loop | ✅ |
@@ -51,8 +51,8 @@ let counter = Counter(executor: executor)
 print(await counter.next()) // runs on the dedicated thread
 
 // after quiescence:
-executor.shutdown() // blocks until the queue drained and sealed; idempotent; never call on the bound thread
-// in an async context, `await executor.shutdown()` suspends instead of blocking
+await executor.shutdown() // suspends until the queue drained and sealed; idempotent; never await on the bound thread
+// the synchronous shutdown() blocks instead, for synchronous contexts
 ```
 
 ### Caller-driven pump (self-attach)
@@ -88,7 +88,8 @@ let executor = MigratingThreadExecutor(bound: first)
 try await executor.migrate(to: second)
 
 // bound executors are borrowed: each ends through its own exit, once idle
-first.shutdown()
+await first.shutdown()
+await second.shutdown()
 ```
 
 ### Endpoint shapes
