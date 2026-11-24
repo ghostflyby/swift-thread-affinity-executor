@@ -40,6 +40,90 @@ private final class GatingBound: ThreadBoundExecutor {
   }
 }
 
+/// `ThreadBoundExecutor` the test drives by hand: every hand-over queues in
+/// the test's own queue and signals, and only a `permit` runs the next job
+/// on the bound thread. It is the test's barrier, and its queue is where
+/// acceptance is observed — not inside the library.
+private final class ManualBound: ThreadBoundExecutor, @unchecked Sendable {
+  private final class State: @unchecked Sendable {
+    let condition = NSCondition()
+    var jobs: [UnownedJob] = []
+    var permits = 0
+    var stopped = false
+  }
+
+  private let state = State()
+  private let published = TestBox<ThreadID?>(nil)
+  private let started = DispatchSemaphore(value: 0)
+  /// One signal per job handed over.
+  let received = DispatchSemaphore(value: 0)
+  private let finished = DispatchSemaphore(value: 0)
+
+  init(name: String) {
+    let thread = Thread { [self] in controlLoop() }
+    thread.name = name
+    thread.start()
+    started.wait()
+  }
+
+  var threadID: ThreadID {
+    guard let threadID = published.get() else {
+      preconditionFailure("ManualBound read before its thread started")
+    }
+    return threadID
+  }
+
+  func enqueue(_ job: consuming ExecutorJob) {
+    state.condition.lock()
+    state.jobs.append(UnownedJob(job))
+    state.condition.broadcast()
+    state.condition.unlock()
+    received.signal()
+  }
+
+  /// Lets the next `count` queued jobs run on the bound thread.
+  func permit(_ count: Int = 1) {
+    state.condition.lock()
+    state.permits += count
+    state.condition.broadcast()
+    state.condition.unlock()
+  }
+
+  func stopAndJoin() async {
+    stop()
+    await waitForSignal(finished)
+  }
+
+  private func stop() {
+    state.condition.lock()
+    state.stopped = true
+    state.condition.broadcast()
+    state.condition.unlock()
+  }
+
+  private func controlLoop() {
+    published.set(ThreadID.current)
+    started.signal()
+    state.condition.lock()
+    while true {
+      if state.jobs.isEmpty && state.stopped {
+        state.condition.unlock()
+        finished.signal()
+        return
+      }
+      if state.permits > 0 && !state.jobs.isEmpty {
+        state.permits -= 1
+        let job = state.jobs.removeFirst()
+        state.condition.unlock()
+        runJob(job)
+        state.condition.lock()
+        continue
+      }
+      state.condition.wait()
+    }
+  }
+}
+
 /// Actor fixture bound to the migrating executor — jobs must keep flowing
 /// across migrations without rebinding.
 private actor MigrationCounter {
@@ -205,72 +289,58 @@ private func stop(_ host: AttachedHost) async {
   await shutdown(second)
 }
 
-/// The cut drains what the old bound executor already queued. A barrier job
-/// parks the old thread; a second job queued behind it — accepted, not
-/// started — is still pending when the migration is called. Releasing the
-/// barrier lets the pending job and the migration's own barrier run on the
-/// old thread: the pending job reports the old identity, and a job after
-/// the migration reports the new one.
-@Test func pendingOldJobDrainsOnTheOldThread() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
-  let executor = MigratingThreadExecutor(bound: first)
-  let oldThread = first.threadID
-  let threads = TestBox<[ThreadID]>([])
+/// The cut, observed at the bound itself: a hand-driven old bound holds
+/// every job until the test permits it, so each report's acceptance is a
+/// signal the test waits for. Two reports sent through the migrating
+/// executor before the migration are served by the old thread; the arrival
+/// of the migration's own barrier at the bound marks the cut, and the two
+/// reports sent after it are served by the new thread.
+@Test func migrationIDsAcrossTheCut() async throws {
+  let oldBound = ManualBound(name: "tae-migrate-first")
+  let newBound = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: oldBound)
+  let oldThread = oldBound.threadID
 
-  // The barrier is a job of the migrating executor; its start proves it is
-  // accepted before the cut. It parks the old thread.
-  let running = DispatchSemaphore(value: 0)
-  let release = DispatchSemaphore(value: 0)
-  let barrier = Task {
-    await withTaskExecutorPreference(executor) {
-      running.signal()
-      blockingWait(release)
-    }
-  }
-  await waitForSignal(running)
-
-  // A job queued on the old bound executor after the barrier started: it is
-  // accepted, cannot start until the barrier yields, and is still pending
-  // when the migration is called.
-  let pendingRan = DispatchSemaphore(value: 0)
-  Task {
-    await withTaskExecutorPreference(first) {
-      threads.with { $0.append(ThreadID.current) }
-      pendingRan.signal()
+  func report() -> Task<ThreadID, Never> {
+    Task {
+      await withTaskExecutorPreference(executor) {
+        ThreadID.current
+      }
     }
   }
 
-  #expect(executor.currentThreadID == oldThread)
-  #expect(threads.get().isEmpty)
+  // Two reports accepted before the cut; nothing runs until permitted.
+  let first = report()
+  await waitForSignal(oldBound.received)
+  let second = report()
+  await waitForSignal(oldBound.received)
 
-  let finished = TestBox(false)
+  // The migration starts. Its barrier arrives at the old bound once routing
+  // has stopped — that hand-over is the cut.
   let migration = Task {
-    try await executor.migrate(to: second)
-    finished.set(true)
+    try await executor.migrate(to: newBound)
   }
+  await waitForSignal(oldBound.received)
 
-  // The migration's barrier is queued behind the parked job, so the
-  // migration cannot complete while the old thread is held.
-  try await Task.sleep(for: .milliseconds(100))
-  #expect(finished.get() == false)
+  // Sent after the cut: it cannot reach the old bound any more.
+  let third = report()
 
-  release.signal()
-  await waitForSignal(pendingRan)
-  await barrier.value
+  // The old side drains: the two reports, then the migration's own barrier,
+  // whose release hands the staged report to the new bound.
+  oldBound.permit(3)
   try await migration.value
 
-  // The job queued before the cut ran on the old thread.
-  #expect(threads.get() == [oldThread])
-  #expect(executor.currentThreadID == second.threadID)
+  // Sent after the release.
+  let fourth = report()
 
-  let after = await withTaskExecutorPreference(executor) {
-    ThreadID.current
-  }
-  #expect(after == second.threadID)
+  #expect(await first.value == oldThread)
+  #expect(await second.value == oldThread)
+  #expect(await third.value == newBound.threadID)
+  #expect(await fourth.value == newBound.threadID)
+  #expect(executor.currentThreadID == newBound.threadID)
 
-  await shutdown(first)
-  await shutdown(second)
+  await oldBound.stopAndJoin()
+  await shutdown(newBound)
 }
 
 /// While a migration is in flight a second one is refused. The old bound is
