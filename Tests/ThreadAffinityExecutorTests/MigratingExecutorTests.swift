@@ -13,33 +13,6 @@ import Testing
 
 @testable import ThreadAffinityExecutor
 
-/// `ThreadBoundExecutor` that parks the first job it is handed until the
-/// test opens the gate, signalling when the hand-over starts.
-private final class GatingBound: ThreadBoundExecutor {
-  private let inner: DedicatedThreadExecutor
-  private let entered = Atomic<Bool>(false)
-  let handoverStarted = DispatchSemaphore(value: 0)
-  let gate = DispatchSemaphore(value: 0)
-
-  init(_ inner: DedicatedThreadExecutor) {
-    self.inner = inner
-  }
-
-  var threadID: ThreadID {
-    inner.threadID
-  }
-
-  func enqueue(_ job: consuming ExecutorJob) {
-    if entered.compareExchange(expected: false, desired: true, ordering: .acquiringAndReleasing)
-      .exchanged
-    {
-      handoverStarted.signal()
-      gate.wait()
-    }
-    inner.enqueue(job)
-  }
-}
-
 /// `ThreadBoundExecutor` the test drives by hand: every hand-over queues in
 /// the test's own queue and signals, and only a `permit` runs the next job
 /// on the bound thread. It is the test's barrier, and its queue is where
@@ -343,27 +316,28 @@ private func stop(_ host: AttachedHost) async {
   await newBound.shutdown()
 }
 
-/// While a migration is in flight a second one is refused. The old bound is
-/// gated, so the migration's own barrier parks at its hand-over: reaching
-/// that gate proves the migration is in flight.
+/// While a migration is in flight a second one is refused. The hand-driven
+/// old bound receives the migration's own barrier and holds it until
+/// permitted: that hand-over is the in-flight state, observed without
+/// blocking any thread.
 @Test func concurrentMigrationReportsBusy() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let oldBound = ManualBound(name: "tae-migrate-first")
   let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
   let third = try DedicatedThreadExecutor(name: "tae-migrate-third")
-  let gatedFirst = GatingBound(first)
-  let executor = MigratingThreadExecutor(bound: gatedFirst)
+  let executor = MigratingThreadExecutor(bound: oldBound)
 
   let migration = Task {
     try await executor.migrate(to: second)
   }
-  let inFlight = await waitForSignal(gatedFirst.handoverStarted, timeout: 10)
-  #expect(inFlight)
+  // Routing has stopped by the time the barrier reaches the old bound; it
+  // stays in flight until the barrier runs.
+  await waitForSignal(oldBound.received)
 
   await #expect(throws: MigrationError.busy) {
     try await executor.migrate(to: third)
   }
 
-  gatedFirst.gate.signal()
+  oldBound.permit(1)
   try await migration.value
   #expect(executor.currentThreadID == second.threadID)
 
@@ -371,7 +345,7 @@ private func stop(_ host: AttachedHost) async {
   try await executor.migrate(to: third)
   #expect(executor.currentThreadID == third.threadID)
 
-  await first.shutdown()
+  await oldBound.stopAndJoin()
   await second.shutdown()
   await third.shutdown()
 }
