@@ -52,6 +52,7 @@ print(await counter.next()) // runs on the dedicated thread
 
 // after quiescence:
 executor.shutdown() // blocks until the queue drained and sealed; idempotent; never call on the bound thread
+// in an async context, `await executor.shutdown()` suspends instead of blocking
 ```
 
 ### Caller-driven pump (self-attach)

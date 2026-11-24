@@ -30,16 +30,6 @@ func waitForSignal(_ semaphore: DispatchSemaphore, timeout: TimeInterval) async 
   }
 }
 
-/// Runs the blocking dedicated-executor shutdown off the cooperative pool.
-func shutdown(_ executor: DedicatedThreadExecutor) async {
-  await withCheckedContinuation { continuation in
-    DispatchQueue.global().async {
-      executor.shutdown()
-      continuation.resume()
-    }
-  }
-}
-
 /// Runs the blocking attachment detach off the cooperative pool.
 @discardableResult
 func detach(_ executor: AttachedThreadExecutor) async -> Bool {

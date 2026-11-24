@@ -31,7 +31,7 @@ import Testing
       group.addTask {
         let executor = try DedicatedThreadExecutor(name: "tae-concurrent-\(index)")
         #expect(executor.threadID != ThreadID.current)
-        await shutdown(executor)
+        await executor.shutdown()
       }
     }
     try await group.waitForAll()
@@ -57,7 +57,7 @@ import Testing
   }
   #expect(jobThread == initializerThreads.get().first)
   #expect(jobThread == executor.threadID)
-  await shutdown(executor)
+  await executor.shutdown()
 }
 
 private struct InitializationFailed: Error {}
@@ -95,7 +95,7 @@ private struct InitializationFailed: Error {}
   }
 
   // shutdown() joins the exit epilogue: finalize has completed here.
-  await shutdown(executor)
+  await executor.shutdown()
   #expect(finalThread.get() == jobThread.get())
   #expect(finalThread.get() == executor.threadID)
 }
@@ -122,7 +122,7 @@ private struct InitializationFailed: Error {}
 
   #expect(observed.count == 200)
   #expect(observed.allSatisfy { $0 == executor.threadID })
-  await shutdown(executor)
+  await executor.shutdown()
 }
 
 /// Concurrent submitters, exactly-once
@@ -147,7 +147,7 @@ private struct InitializationFailed: Error {}
 
   #expect(counter.value == 8 * 250)
   #expect(threadsSeen.get() == [executor.threadID])
-  await shutdown(executor)
+  await executor.shutdown()
 }
 
 // MARK: - Isolation checks
@@ -169,7 +169,7 @@ private struct InitializationFailed: Error {}
   }
 
   #expect(positive == true)
-  await shutdown(executor)
+  await executor.shutdown()
 }
 
 /// Jobs accepted before shutdown all execute; the
@@ -191,7 +191,37 @@ private struct InitializationFailed: Error {}
     }
   }
 
-  await shutdown(executor)
+  await executor.shutdown()
   #expect(counter.value == 200)
+  #expect(executor.hasFinished)
+}
+
+/// The async shutdown suspends instead of blocking: concurrent callers all
+/// resume only after the queue drained, `finalize` ran on the bound thread
+/// and the worker exited.
+@Test func asyncShutdownWaitsForExit() async throws {
+  let finalThread = TestBox<ThreadID?>(nil)
+  let executor = try DedicatedThreadExecutor(
+    name: "tae-async-shutdown",
+    lifecycle: ClosureLifecycle(
+      finalize: { finalThread.set(ThreadID.current) }
+    )
+  )
+  let counter = ThreadSafeCounter()
+
+  await withTaskExecutorPreference(executor) {
+    counter.increment(recording: TestBox<Set<ThreadID>>([]))
+  }
+
+  await withTaskGroup(of: Void.self) { group in
+    for _ in 0..<4 {
+      group.addTask {
+        await executor.shutdown()
+      }
+    }
+  }
+
+  #expect(counter.value == 1)
+  #expect(finalThread.get() == executor.threadID)
   #expect(executor.hasFinished)
 }

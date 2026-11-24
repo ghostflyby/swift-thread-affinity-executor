@@ -10,6 +10,9 @@ and this project adheres to
 
 ### Added
 
+- `DedicatedThreadExecutor.shutdown() async`: suspends the calling task
+  until the worker drained, ran `finalize` and exited, instead of blocking a
+  thread. The synchronous `shutdown()` remains for synchronous contexts.
 - `Affinity`: the common protocol of the executor families. Both
   `ThreadBoundExecutor` and `MigratingThreadExecutor` refine it.
   `currentThreadID` names the thread jobs accepted right now run on, and the

@@ -271,7 +271,7 @@ private func stop(_ host: AttachedHost) async {
   #expect(threads.count == 8)
   #expect(threads.allSatisfy { $0 == first.threadID })
 
-  await shutdown(first)
+  await first.shutdown()
 }
 
 @Test func migrationMovesSubsequentJobsToTheNewBoundThread() async throws {
@@ -285,8 +285,8 @@ private func stop(_ host: AttachedHost) async {
   let threads = await sampleThreads(executor, count: 8)
   #expect(threads.allSatisfy { $0 == second.threadID })
 
-  await shutdown(first)
-  await shutdown(second)
+  await first.shutdown()
+  await second.shutdown()
 }
 
 /// The cut, observed at the bound itself: a hand-driven old bound holds
@@ -340,7 +340,7 @@ private func stop(_ host: AttachedHost) async {
   #expect(executor.currentThreadID == newBound.threadID)
 
   await oldBound.stopAndJoin()
-  await shutdown(newBound)
+  await newBound.shutdown()
 }
 
 /// While a migration is in flight a second one is refused. The old bound is
@@ -371,9 +371,9 @@ private func stop(_ host: AttachedHost) async {
   try await executor.migrate(to: third)
   #expect(executor.currentThreadID == third.threadID)
 
-  await shutdown(first)
-  await shutdown(second)
-  await shutdown(third)
+  await first.shutdown()
+  await second.shutdown()
+  await third.shutdown()
 }
 
 /// Awaiting `migrate` from a task bound to the executor is safe: the
@@ -392,8 +392,8 @@ private func stop(_ host: AttachedHost) async {
 
   #expect(threads.get() == [first.threadID, second.threadID])
 
-  await shutdown(first)
-  await shutdown(second)
+  await first.shutdown()
+  await second.shutdown()
 }
 
 @Test func actorBoundToTheExecutorSurvivesMigration() async throws {
@@ -412,8 +412,8 @@ private func stop(_ host: AttachedHost) async {
   let after = await counter.threadID()
   #expect(after == second.threadID)
 
-  await shutdown(first)
-  await shutdown(second)
+  await first.shutdown()
+  await second.shutdown()
 }
 
 /// Synchronous `assumeIsolated` entry from the current thread. The job runs
@@ -443,8 +443,8 @@ private func stop(_ host: AttachedHost) async {
   }
   #expect(viaNewBound == 3)
 
-  await shutdown(first)
-  await shutdown(second)
+  await first.shutdown()
+  await second.shutdown()
 }
 
 /// The isolation check follows the current thread: positive from a job on
@@ -468,8 +468,8 @@ private func stop(_ host: AttachedHost) async {
   }
   #expect(onSecond == true)
 
-  await shutdown(first)
-  await shutdown(second)
+  await first.shutdown()
+  await second.shutdown()
 }
 
 /// A task suspended when the cut passes resumes on the new bound thread.
@@ -497,8 +497,8 @@ private func stop(_ host: AttachedHost) async {
 
   #expect(threads.get() == [first.threadID, second.threadID])
 
-  await shutdown(first)
-  await shutdown(second)
+  await first.shutdown()
+  await second.shutdown()
 }
 
 /// Structured child tasks inherit the executor they were created under and
@@ -551,8 +551,8 @@ private func stop(_ host: AttachedHost) async {
   let after = Array(repeating: second.threadID, count: 2 * created)
   #expect(threads.get() == before + after)
 
-  await shutdown(first)
-  await shutdown(second)
+  await first.shutdown()
+  await second.shutdown()
 }
 
 /// `async let` children, like task-group children, inherit the executor they
@@ -582,8 +582,8 @@ private func stop(_ host: AttachedHost) async {
   #expect(observed.prefix(2).allSatisfy { $0 == first.threadID })
   #expect(observed.suffix(2).allSatisfy { $0 == second.threadID })
 
-  await shutdown(first)
-  await shutdown(second)
+  await first.shutdown()
+  await second.shutdown()
 }
 
 /// Nested scopes do not strand work on the old thread: a task suspended
@@ -626,8 +626,8 @@ private func stop(_ host: AttachedHost) async {
   let afterScope = observed.last
   #expect(afterScope != first.threadID && afterScope != second.threadID)
 
-  await shutdown(first)
-  await shutdown(second)
+  await first.shutdown()
+  await second.shutdown()
 }
 
 /// An unstructured `Task` whose body needs neither the executor nor an
@@ -662,8 +662,8 @@ private func stop(_ host: AttachedHost) async {
   #expect(observed.count == 2 * created)
   #expect(observed.allSatisfy { $0 != first.threadID && $0 != second.threadID })
 
-  await shutdown(first)
-  await shutdown(second)
+  await first.shutdown()
+  await second.shutdown()
 }
 
 /// Producers racing the migration: a job lands on either side of the cut,
@@ -709,8 +709,8 @@ private func stop(_ host: AttachedHost) async {
     #expect(sequence[cut...].allSatisfy { $0 == second.threadID })
   }
 
-  await shutdown(first)
-  await shutdown(second)
+  await first.shutdown()
+  await second.shutdown()
 }
 
 /// The barrier belongs to the old bound executor, not to the migrating
@@ -750,8 +750,8 @@ private func stop(_ host: AttachedHost) async {
   #expect(order.get() == ["other client done", "migration done"])
   #expect(executor.currentThreadID == second.threadID)
 
-  await shutdown(first)
-  await shutdown(second)
+  await first.shutdown()
+  await second.shutdown()
 }
 
 /// Bound executors are borrowed: one migrating executor leaving does not
@@ -773,8 +773,8 @@ private func stop(_ host: AttachedHost) async {
   let (left, right) = await (departingThreads, convergedThreads)
   #expect((left + right).allSatisfy { $0 == second.threadID })
 
-  await shutdown(first)
-  await shutdown(second)
+  await first.shutdown()
+  await second.shutdown()
 }
 
 /// A bound executor need not own its thread: attached executors on borrowed
@@ -817,7 +817,7 @@ private func stop(_ host: AttachedHost) async {
   let threads = await sampleThreads(executor, count: 8)
   #expect(threads.allSatisfy { $0 == first.threadID })
 
-  await shutdown(first)
+  await first.shutdown()
 }
 
 @Test func bothExecutorFamiliesAreAffinity() async throws {
@@ -827,5 +827,5 @@ private func stop(_ host: AttachedHost) async {
 
   #expect(executors.map { $0.currentThreadID } == [first.threadID, first.threadID])
 
-  await shutdown(first)
+  await first.shutdown()
 }
