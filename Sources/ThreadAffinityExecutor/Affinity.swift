@@ -12,13 +12,14 @@
 /// thread for its whole lifetime; a `MigratingThreadExecutor` changes it
 /// only through an explicit migration. What every conformance must uphold:
 ///
-/// 1. **One current thread** — `currentThreadID` names the thread that runs
-///    the jobs accepted right now, and no job of this executor runs
-///    elsewhere.
-/// 2. **Ordered exchange** — when the current thread changes, every job
-///    accepted before the change completes before any later job starts.
+/// 1. **One current thread** — `currentThreadID` names the thread this
+///    executor's jobs run on, and no job of this executor runs elsewhere.
+/// 2. **Ordered exchange** — when the current thread changes, everything
+///    routed to the old thread has completed, and jobs keep their acceptance
+///    order across the exchange.
 public protocol Affinity: SerialExecutor, TaskExecutor {
-  /// The OS thread running the jobs accepted right now.
+  /// The OS thread this executor's jobs run on right now: a synchronous
+  /// caller on it is isolated with respect to them.
   var currentThreadID: ThreadID { get }
 }
 

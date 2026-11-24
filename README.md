@@ -1,6 +1,6 @@
 # ThreadAffinityExecutor
 
-Thread-affinity executors for Swift Concurrency: every job accepted by one of these executors runs on the same OS thread for the executor's whole lifetime. The bound thread can be created by the library, provided by the caller, or borrowed from an existing fixed-thread mechanism.
+Thread-affinity executors for Swift Concurrency: at any moment, every job accepted by one of these executors runs on one known OS thread. A `ThreadBoundExecutor` keeps that thread for its whole lifetime; a `MigratingThreadExecutor` changes it only through an explicit migration. The bound thread can be created by the library, provided by the caller, or borrowed from an existing fixed-thread mechanism.
 
 ## Scope
 

@@ -25,9 +25,9 @@ public enum MigrationError: Error, Sendable, Equatable {
 ///     let executor = MigratingThreadExecutor(bound: first)
 ///     try await executor.migrate(to: second)
 ///
-/// **The migration cut.** A job runs on the thread that was current when
-/// the executor accepted it; a migration moves only what is accepted
-/// afterwards:
+/// **The migration cut.** A job accepted before the cut runs on the old
+/// bound thread, one accepted after it on the new one; a migration moves
+/// only what is accepted afterwards:
 ///
 /// 1. Routing stops. Jobs arriving from now on are staged.
 /// 2. A barrier is queued on the old bound executor. It runs once every
@@ -38,7 +38,9 @@ public enum MigrationError: Error, Sendable, Equatable {
 /// Every job accepted before the cut therefore completes before any later
 /// job starts. `currentThreadID` switches when the barrier has run, not
 /// when routing stops: until then jobs are still running on the old
-/// thread. The release runs on the old bound executor's thread.
+/// thread, so that is the current one although new jobs are already bound
+/// for the new. The release runs on the old bound executor's thread, and
+/// whatever is queued behind it there waits for it.
 ///
 /// **Bound executors are borrowed.** A bound executor may serve other
 /// clients before, during and after; a migration neither ends it nor
@@ -46,21 +48,33 @@ public enum MigrationError: Error, Sendable, Equatable {
 ///
 /// **Contract on the bound executors.** They must run jobs in acceptance
 /// order (the barrier is a job), keep running the jobs they accepted, and
-/// have an `enqueue` that returns promptly and never calls back into this
-/// executor — it runs under the routing lock. A bound executor that stops
-/// servicing accepted jobs leaves the migration pending for good: those
-/// jobs never complete, which is that executor's state, reported as it is.
+/// have an `enqueue` that returns promptly. Direct submissions call it with
+/// the routing lock held, so those calls must not call back into this
+/// executor. Their jobs must not re-enter the bound executor's own loop: a
+/// nested run loop on the bound thread would run the barrier while an
+/// earlier job is still live, and the ordering above would not hold.
+///
+/// **When a bound executor stops.** `Executor` cannot refuse a job, and
+/// nothing reports this. An old bound executor that stops servicing leaves
+/// the migration pending for good: the barrier never runs, `migrate(to:)`
+/// never returns, later jobs stay staged and later migrations throw
+/// `MigrationError.busy`. A new bound executor that already stopped accepts
+/// the release silently and discards the staged jobs, and `migrate(to:)`
+/// still returns. A holder cannot tell the pending state from a long
+/// backlog.
 ///
 /// **What follows a migration.** Jobs are enqueued on the bound executor
 /// through its own `enqueue`, so they run as that executor; the
 /// thread-based `isIsolatingCurrentContext()` is what keeps synchronous
 /// isolation checks working for actors bound to the migrating executor.
 /// Work that names the migrating executor follows: a task suspended across
-/// the cut resumes on the new thread, and so do structured child tasks and
-/// unstructured tasks whose body uses an actor bound to the executor. Any
-/// other unstructured `Task` stays on the default executor, as Swift
-/// defines for unstructured tasks; it needs an explicit
-/// `withTaskExecutorPreference`.
+/// the cut resumes on the new thread, and so do structured child tasks,
+/// nested `withTaskExecutorPreference` scopes and unstructured tasks whose
+/// body uses an actor bound to the executor. Any other unstructured `Task`
+/// stays on the default executor, as Swift defines for unstructured tasks;
+/// it needs an explicit `withTaskExecutorPreference`. Code after such a
+/// scope is no longer the executor's job: it continues on the executor the
+/// task had before the scope.
 public final class MigratingThreadExecutor: Affinity {
 
   /// Routing table under one lock. A job is accepted inside the lock, so
@@ -86,7 +100,8 @@ public final class MigratingThreadExecutor: Affinity {
     )
   }
 
-  /// The thread jobs accepted right now run on.
+  /// The thread this executor's jobs run on right now. It switches when the
+  /// barrier has run, not when routing stops.
   public var currentThreadID: ThreadID {
     routing.withLock { $0.publishedThreadID }
   }

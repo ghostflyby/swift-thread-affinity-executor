@@ -12,8 +12,10 @@
 ///
 /// 1. **Unique thread** — all jobs run on the same OS thread from the moment
 ///    the executor becomes available until it leaves its effective lifetime.
-/// 2. **Stable identity** — `threadID` never changes after publication;
-///    migrating to another thread means retiring this executor instance.
+/// 2. **Stable identity** — `threadID` never changes after publication. A
+///    bound executor never migrates: work moves to another thread only by
+///    being routed through a different executor, as
+///    `MigratingThreadExecutor` does.
 /// 3. **Real submission** — `enqueue` is safe from any thread and the job is
 ///    eventually handed to the bound thread.
 /// 4. **Serialization** — jobs obey `SerialExecutor` mutual exclusion and
