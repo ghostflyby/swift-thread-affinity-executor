@@ -106,17 +106,6 @@ public final class MigratingThreadExecutor: ThreadAffinityExecutor {
     routing.withLock { $0.publishedThreadID }
   }
 
-  /// Whether a migration is in flight. Internal; tests and diagnostics.
-  var isMigrating: Bool {
-    routing.withLock { $0.staged != nil }
-  }
-
-  /// Jobs staged by the migration in flight and not yet released. Internal;
-  /// tests and diagnostics use it to observe a settled backlog.
-  var stagedJobCount: Int {
-    routing.withLock { $0.staged?.count ?? 0 }
-  }
-
   public func enqueue(_ job: consuming ExecutorJob) {
     let pending = UnownedJob(job)
     routing.withLock { routing in
