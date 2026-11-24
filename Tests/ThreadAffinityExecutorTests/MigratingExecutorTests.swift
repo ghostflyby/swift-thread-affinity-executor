@@ -3,8 +3,8 @@
 //  ThreadAffinityExecutorTests
 //
 //  The migrating executor over thread-bound executors: the migration cut,
-//  staging and release order, isolation across the two identities, and
-//  borrowed bound executors.
+//  staging and release order, isolation across the two identities, what
+//  follows a migration, and bound executors of either family — borrowed.
 //
 
 import Foundation
@@ -30,6 +30,34 @@ private final class CountingBound: ThreadBoundExecutor {
 
   func enqueue(_ job: consuming ExecutorJob) {
     _ = accepted.wrappingAdd(1, ordering: .relaxed)
+    inner.enqueue(job)
+  }
+}
+
+/// `ThreadBoundExecutor` that parks the first job it is handed until the
+/// test opens the gate. A release handing over its first batch is then held
+/// mid-flight, so later jobs can be staged behind that batch.
+private final class GatingBound: ThreadBoundExecutor {
+  private let inner: DedicatedThreadExecutor
+  private let entered = Atomic<Bool>(false)
+  let handoverStarted = DispatchSemaphore(value: 0)
+  let gate = DispatchSemaphore(value: 0)
+
+  init(_ inner: DedicatedThreadExecutor) {
+    self.inner = inner
+  }
+
+  var threadID: ThreadID {
+    inner.threadID
+  }
+
+  func enqueue(_ job: consuming ExecutorJob) {
+    if entered.compareExchange(expected: false, desired: true, ordering: .acquiringAndReleasing)
+      .exchanged
+    {
+      handoverStarted.signal()
+      gate.wait()
+    }
     inner.enqueue(job)
   }
 }
@@ -93,6 +121,18 @@ private func blockingWait(_ semaphore: DispatchSemaphore) {
   semaphore.wait()
 }
 
+/// Blocks the calling thread until `condition` holds; false when it still
+/// does not after the attempt budget. For a job that must hold its bound
+/// thread until something happened elsewhere.
+private func blockUntil(_ condition: () -> Bool, attempts: Int = 1_000) -> Bool {
+  var remaining = attempts
+  while !condition() && remaining > 0 {
+    Thread.sleep(forTimeInterval: 0.001)
+    remaining -= 1
+  }
+  return condition()
+}
+
 /// Polls `condition` every 10 ms; false when it still does not hold after
 /// the attempt budget.
 private func waitUntil(
@@ -105,6 +145,35 @@ private func waitUntil(
     remaining -= 1
   }
   return condition()
+}
+
+/// One recorded job: its submission index and the thread it ran on.
+private typealias Record = (index: Int, thread: ThreadID)
+
+/// Submits one job to `executor` that records the thread it ran on.
+private func submit(
+  _ executor: MigratingThreadExecutor,
+  index: Int,
+  to records: TestBox<[Record]>
+) -> Task<Void, Never> {
+  Task {
+    await withTaskExecutorPreference(executor) {
+      records.with { $0.append((index, ThreadID.current)) }
+    }
+  }
+}
+
+/// The body of an `async let` child: records its thread, waits for the
+/// gate, and records it again.
+private func recordAcross(
+  gate: DispatchSemaphore,
+  started: TestBox<Int>,
+  threads: TestBox<[ThreadID]>
+) async {
+  threads.with { $0.append(ThreadID.current) }
+  started.with { $0 += 1 }
+  await waitForSignal(gate)
+  threads.with { $0.append(ThreadID.current) }
 }
 
 /// Runs `count` jobs on `executor`; the threads they ran on.
@@ -126,6 +195,48 @@ private func sampleThreads(
     }
     return threads
   }
+}
+
+/// An attached executor and the pump its thread runs.
+private struct AttachedHost: Sendable {
+  let executor: AttachedThreadExecutor
+  let dispatcher: QueueDispatcher
+}
+
+/// Hands an executor created on the pump thread back to its spawner; the
+/// executor is written before the signal and read after the wait.
+private final class AttachBootstrap: @unchecked Sendable {
+  let ready = DispatchSemaphore(value: 0)
+  var executor: AttachedThreadExecutor?
+
+  func publish(_ executor: AttachedThreadExecutor) {
+    self.executor = executor
+    ready.signal()
+  }
+}
+
+/// A thread the test owns, running a `QueueDispatcher` pump with an
+/// attached executor on it: a bound executor that borrows its thread,
+/// unlike the dedicated ones the other tests use.
+private func spawnAttached(_ name: String) -> AttachedHost {
+  let dispatcher = QueueDispatcher()
+  let bootstrap = AttachBootstrap()
+  let thread = Thread {
+    let executor = try! AttachedThreadExecutor.attachOnCurrentThread(to: dispatcher)
+    bootstrap.publish(executor)
+    dispatcher.run()
+  }
+  thread.name = name
+  thread.start()
+  bootstrap.ready.wait()
+  return AttachedHost(executor: bootstrap.executor!, dispatcher: dispatcher)
+}
+
+/// Ends an attached host: the attachment detaches — its finalize runs
+/// through the pump — and the pump's `run()` then returns.
+private func stop(_ host: AttachedHost) async {
+  _ = await detach(host.executor)
+  host.dispatcher.stop()
 }
 
 @Test func jobsRunOnTheInitialBoundThread() async throws {
@@ -160,40 +271,55 @@ private func sampleThreads(
 /// The migration cut is acceptance: everything the old bound executor
 /// accepted finishes there, in order, before anything accepted after
 /// routing stopped runs on the new one — also in order. While the old
-/// executor is still draining, the staged jobs wait and the reported
-/// thread is still the old one.
+/// executor is still draining, the staged jobs wait, the reported thread is
+/// still the old one, and so is the thread the isolation check accepts.
 @Test func migrationMovesOnlyJobsAcceptedAfterwards() async throws {
   let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
   let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
   let firstBound = CountingBound(first)
   let executor = MigratingThreadExecutor(bound: firstBound)
-  let records = TestBox<[(index: Int, thread: ThreadID)]>([])
+  let records = TestBox<[Record]>([])
+  let queued = 16
+  let staged = 16
 
   // One job holds the first executor, so everything submitted below queues.
+  // Once released it submits again — a job running before the cut handing in
+  // work after it — and holds the thread until that work is staged.
   let hold = DispatchSemaphore(value: 0)
   let held = DispatchSemaphore(value: 0)
+  let resubmitted = TestBox<Task<Void, Never>?>(nil)
+  let restaged = TestBox(false)
   let holder = Task {
     await withTaskExecutorPreference(executor) {
       held.signal()
       blockingWait(hold)
+      resubmitted.set(submit(executor, index: queued + staged, to: records))
+      restaged.set(blockUntil { executor.stagedJobCount == staged + 1 })
     }
   }
   await waitForSignal(held)
   defer { hold.signal() }
 
+  // A direct client of the first executor, queued behind the holder. It runs
+  // before the barrier, so the old thread must still count as current.
+  let isolatedOnOld = TestBox<Bool?>(nil)
+  let probe = Task {
+    await withTaskExecutorPreference(firstBound) {
+      isolatedOnOld.set(executor.isIsolatingCurrentContext())
+    }
+  }
+  let probeQueued = try await waitUntil {
+    firstBound.accepted.load(ordering: .acquiring) == 2
+  }
+  #expect(probeQueued)
+
   // Submitted one at a time, each after the previous one was accepted, so
   // acceptance order is index order.
-  let queued = 16
   var queuedTasks: [Task<Void, Never>] = []
   for index in 0..<queued {
-    queuedTasks.append(
-      Task {
-        await withTaskExecutorPreference(executor) {
-          records.with { $0.append((index, ThreadID.current)) }
-        }
-      })
+    queuedTasks.append(submit(executor, index: index, to: records))
     let settled = try await waitUntil {
-      firstBound.accepted.load(ordering: .acquiring) == index + 2
+      firstBound.accepted.load(ordering: .acquiring) == index + 3
     }
     #expect(settled)
   }
@@ -206,15 +332,9 @@ private func sampleThreads(
   let routingStopped = try await waitUntil { executor.isMigrating }
   #expect(routingStopped)
 
-  let staged = 16
   var stagedTasks: [Task<Void, Never>] = []
   for index in 0..<staged {
-    stagedTasks.append(
-      Task {
-        await withTaskExecutorPreference(executor) {
-          records.with { $0.append((queued + index, ThreadID.current)) }
-        }
-      })
+    stagedTasks.append(submit(executor, index: queued + index, to: records))
     let settled = try await waitUntil { executor.stagedJobCount == index + 1 }
     #expect(settled)
   }
@@ -223,9 +343,19 @@ private func sampleThreads(
   #expect(finished.get() == false)
   #expect(executor.currentThreadID == first.threadID)
   #expect(records.get().isEmpty)
+  // The new executor already serves its own clients, but nothing of the
+  // migrating executor runs there, so that thread does not count as current.
+  let isolatedOnNew = await withTaskExecutorPreference(second) {
+    executor.isIsolatingCurrentContext()
+  }
+  #expect(isolatedOnNew == false)
 
   hold.signal()
   await holder.value
+  await probe.value
+  if let task = resubmitted.get() {
+    await task.value
+  }
   try await migration.value
   for task in queuedTasks {
     await task.value
@@ -234,9 +364,11 @@ private func sampleThreads(
     await task.value
   }
 
+  #expect(isolatedOnOld.get() == true)
+  #expect(restaged.get())
   let observed = records.get()
-  #expect(observed.count == queued + staged)
-  #expect(observed.map(\.index) == Array(0..<(queued + staged)))
+  #expect(observed.count == queued + staged + 1)
+  #expect(observed.map(\.index) == Array(0..<(queued + staged + 1)))
   #expect(observed.prefix(queued).allSatisfy { $0.thread == first.threadID })
   #expect(observed.dropFirst(queued).allSatisfy { $0.thread == second.threadID })
   #expect(executor.currentThreadID == second.threadID)
@@ -355,6 +487,9 @@ private func sampleThreads(
     nextAssumingIsolated(counter)
   }
   #expect(viaNewBound == 3)
+
+  await shutdown(first)
+  await shutdown(second)
 }
 
 /// The isolation check follows the current thread: positive from a job on
@@ -460,6 +595,81 @@ private func sampleThreads(
   await shutdown(second)
 }
 
+/// `async let` children, like task-group children, inherit the executor they
+/// were created under and follow a migration.
+@Test func asyncLetChildrenFollowMigration() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
+  let gate = DispatchSemaphore(value: 0)
+  let started = TestBox<Int>(0)
+  let threads = TestBox<[ThreadID]>([])
+
+  try await withTaskExecutorPreference(executor) {
+    async let left = recordAcross(gate: gate, started: started, threads: threads)
+    async let right = recordAcross(gate: gate, started: started, threads: threads)
+    let bothStarted = try await waitUntil { started.get() == 2 }
+    #expect(bothStarted)
+
+    try await executor.migrate(to: second)
+    gate.signal()
+    gate.signal()
+    _ = await (left, right)
+  }
+
+  let observed = threads.get()
+  #expect(observed.count == 4)
+  #expect(observed.prefix(2).allSatisfy { $0 == first.threadID })
+  #expect(observed.suffix(2).allSatisfy { $0 == second.threadID })
+
+  await shutdown(first)
+  await shutdown(second)
+}
+
+/// Nested scopes do not strand work on the old thread: a task suspended
+/// inside an inner `withTaskExecutorPreference` scope resumes on the new
+/// bound thread, and so does everything up to the end of the outer scope.
+/// After the outer scope the task is back on the executor it had before.
+@Test func nestedScopesFollowMigration() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
+  let threads = TestBox<[ThreadID]>([])
+  let gate = DispatchSemaphore(value: 0)
+  let inInner = DispatchSemaphore(value: 0)
+
+  let task = Task {
+    await withTaskExecutorPreference(executor) {
+      threads.with { $0.append(ThreadID.current) }
+      await withTaskExecutorPreference(executor) {
+        threads.with { $0.append(ThreadID.current) }
+        inInner.signal()
+        await waitForSignal(gate)
+        threads.with { $0.append(ThreadID.current) }
+      }
+      threads.with { $0.append(ThreadID.current) }
+      await Task.yield()
+      threads.with { $0.append(ThreadID.current) }
+    }
+    threads.with { $0.append(ThreadID.current) }
+  }
+  await waitForSignal(inInner)
+  try await executor.migrate(to: second)
+  gate.signal()
+  await task.value
+
+  // Outer start, inner start; inner resumed, inner left, yielded; scope left.
+  let observed = threads.get()
+  #expect(observed.count == 6)
+  #expect(observed.prefix(2).allSatisfy { $0 == first.threadID })
+  #expect(observed.dropFirst(2).prefix(3).allSatisfy { $0 == second.threadID })
+  let afterScope = observed.last
+  #expect(afterScope != first.threadID && afterScope != second.threadID)
+
+  await shutdown(first)
+  await shutdown(second)
+}
+
 /// An unstructured `Task` whose body needs neither the executor nor an
 /// actor inherits neither: Swift leaves it on the default executor, before
 /// and after a migration — whether created in a plain job under the
@@ -495,17 +705,33 @@ private func sampleThreads(
 }
 
 /// Producers racing the migration: a job lands on either side of the cut,
-/// but execution is still all-old-thread, then all-new-thread.
+/// but execution is still all-old-thread, then all-new-thread. A batch on
+/// each side is pinned first, so neither half of the check can be empty.
 @Test func jobsSerializeAcrossTheCutUnderRacingProducers() async throws {
   let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
   let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
-  let executor = MigratingThreadExecutor(bound: first)
+  let firstBound = CountingBound(first)
+  let executor = MigratingThreadExecutor(bound: firstBound)
   let threads = TestBox<[ThreadID]>([])
-  let jobCount = 200
+  let queued = 50
+  let racing = 200
 
-  let racing = Task {
+  // One job holds the first executor, so the pre-cut batch cannot run yet.
+  let hold = DispatchSemaphore(value: 0)
+  let held = DispatchSemaphore(value: 0)
+  let holder = Task {
+    await withTaskExecutorPreference(executor) {
+      held.signal()
+      blockingWait(hold)
+    }
+  }
+  await waitForSignal(held)
+  defer { hold.signal() }
+
+  // The pre-cut batch: every job of it accepted by the first executor.
+  let preCut = Task {
     await withTaskGroup(of: Void.self) { group in
-      for _ in 0..<jobCount {
+      for _ in 0..<queued {
         group.addTask {
           await withTaskExecutorPreference(executor) {
             threads.with { $0.append(ThreadID.current) }
@@ -514,15 +740,162 @@ private func sampleThreads(
       }
     }
   }
-  try await executor.migrate(to: second)
-  await racing.value
+  let allQueued = try await waitUntil {
+    firstBound.accepted.load(ordering: .acquiring) == queued + 1
+  }
+  #expect(allQueued)
 
-  let sequence = threads.get()
-  #expect(sequence.count == jobCount)
-  if let cut = sequence.firstIndex(where: { $0 != first.threadID }) {
+  // The racing producers begin on the old side of the cut and keep
+  // submitting across it.
+  let racers = Task {
+    await withTaskGroup(of: Void.self) { group in
+      for _ in 0..<racing {
+        group.addTask {
+          await withTaskExecutorPreference(executor) {
+            threads.with { $0.append(ThreadID.current) }
+          }
+        }
+      }
+    }
+  }
+  let someRacedAhead = try await waitUntil {
+    firstBound.accepted.load(ordering: .acquiring) > queued + 1
+  }
+  #expect(someRacedAhead)
+  let migration = Task {
+    try await executor.migrate(to: second)
+  }
+  let routingStopped = try await waitUntil { executor.isMigrating }
+  #expect(routingStopped)
+
+  hold.signal()
+  await holder.value
+  try await migration.value
+  await preCut.value
+  await racers.value
+  let sampled = await sampleThreads(executor, count: 8)
+
+  let sequence = threads.get() + sampled
+  #expect(sequence.count == queued + racing + 8)
+  let cut = sequence.firstIndex(where: { $0 != first.threadID })
+  #expect(cut != nil)
+  if let cut {
+    #expect(cut >= queued)
     #expect(sequence[..<cut].allSatisfy { $0 == first.threadID })
     #expect(sequence[cut...].allSatisfy { $0 == second.threadID })
   }
+
+  await shutdown(first)
+  await shutdown(second)
+}
+
+/// The release is not one shot: a job staged while an earlier batch is being
+/// handed over is released after that batch, in order, and only then does
+/// routing turn direct.
+@Test func jobsStagedDuringTheReleaseFollowTheBatch() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let secondBound = GatingBound(second)
+  let executor = MigratingThreadExecutor(bound: first)
+  let records = TestBox<[Record]>([])
+  let batch = 8
+
+  // Hold the first executor while a batch is staged, then let the barrier
+  // pass.
+  let hold = DispatchSemaphore(value: 0)
+  let held = DispatchSemaphore(value: 0)
+  let holder = Task {
+    await withTaskExecutorPreference(executor) {
+      held.signal()
+      blockingWait(hold)
+    }
+  }
+  await waitForSignal(held)
+  defer { hold.signal() }
+
+  let finished = TestBox(false)
+  let migration = Task {
+    try await executor.migrate(to: secondBound)
+    finished.set(true)
+  }
+  let routingStopped = try await waitUntil { executor.isMigrating }
+  #expect(routingStopped)
+
+  var stagedTasks: [Task<Void, Never>] = []
+  for index in 0..<batch {
+    stagedTasks.append(submit(executor, index: index, to: records))
+    let settled = try await waitUntil { executor.stagedJobCount == index + 1 }
+    #expect(settled)
+  }
+
+  // The holder is not awaited yet: what follows its scope is queued on the
+  // first executor behind the release, and the release is about to be parked.
+  hold.signal()
+  let handoverStarted = await waitForSignal(secondBound.handoverStarted, timeout: 10)
+  #expect(handoverStarted)
+
+  // A job arriving now is staged again, behind the batch already taken.
+  let late = submit(executor, index: batch, to: records)
+  let lateStaged = try await waitUntil { executor.stagedJobCount == 1 }
+  #expect(lateStaged)
+  #expect(executor.isMigrating)
+  #expect(finished.get() == false)
+  #expect(records.get().isEmpty)
+
+  secondBound.gate.signal()
+  await holder.value
+  try await migration.value
+  await late.value
+  for task in stagedTasks {
+    await task.value
+  }
+
+  let observed = records.get()
+  #expect(observed.map(\.index) == Array(0...batch))
+  #expect(observed.allSatisfy { $0.thread == second.threadID })
+  #expect(executor.isMigrating == false)
+  #expect(executor.currentThreadID == second.threadID)
+
+  await shutdown(first)
+  await shutdown(second)
+}
+
+/// The barrier belongs to the old bound executor, not to the migrating
+/// executor: it waits behind another client's job on the same executor.
+@Test func migrationWaitsForTheBoundExecutorsOwnBacklog() async throws {
+  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first)
+
+  // Another client of the first executor holds its thread.
+  let hold = DispatchSemaphore(value: 0)
+  let held = DispatchSemaphore(value: 0)
+  let otherClient = Task {
+    await withTaskExecutorPreference(first) {
+      held.signal()
+      blockingWait(hold)
+    }
+  }
+  await waitForSignal(held)
+  defer { hold.signal() }
+
+  let finished = TestBox(false)
+  let migration = Task {
+    try await executor.migrate(to: second)
+    finished.set(true)
+  }
+  let routingStopped = try await waitUntil { executor.isMigrating }
+  #expect(routingStopped)
+
+  // Nothing of the migrating executor is pending there; the other client's
+  // job alone keeps the migration from completing.
+  try await Task.sleep(for: .milliseconds(100))
+  #expect(finished.get() == false)
+
+  hold.signal()
+  await otherClient.value
+  try await migration.value
+  #expect(executor.currentThreadID == second.threadID)
 
   await shutdown(first)
   await shutdown(second)
@@ -549,6 +922,34 @@ private func sampleThreads(
 
   await shutdown(first)
   await shutdown(second)
+}
+
+/// A bound executor need not own its thread: attached executors on borrowed
+/// pump threads serve on either side of a migration, and the one left behind
+/// stays attached to its own clients.
+@Test func migrationMovesBetweenAttachedExecutors() async throws {
+  let first = spawnAttached("tae-migrate-first")
+  let second = spawnAttached("tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: first.executor)
+  #expect(executor.currentThreadID == first.executor.threadID)
+
+  let before = await sampleThreads(executor, count: 8)
+  #expect(before.allSatisfy { $0 == first.executor.threadID })
+
+  try await executor.migrate(to: second.executor)
+
+  #expect(executor.currentThreadID == second.executor.threadID)
+  let after = await sampleThreads(executor, count: 8)
+  #expect(after.allSatisfy { $0 == second.executor.threadID })
+
+  // The attachment left behind still serves its own clients.
+  let direct = await withTaskExecutorPreference(first.executor) {
+    ThreadID.current
+  }
+  #expect(direct == first.executor.threadID)
+
+  await stop(first)
+  await stop(second)
 }
 
 /// Migrating to the executor already in place is a plain barrier: the
