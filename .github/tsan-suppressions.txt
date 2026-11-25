@@ -8,3 +8,8 @@ race:fulfillSuccess
 race:awaitReady
 race:bindOwnerThread
 race:requireOwnerThread
+# The routing lock: every access to `Routing` runs under `routing.withLock`,
+# and those closures carry the nested type identifier in their mangled
+# symbols (`...7Routing...`). This covers enqueue, the migration cut, and
+# releaseStagedJobs without matching the rest of the class.
+race:Routing
