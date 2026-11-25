@@ -42,7 +42,12 @@ jobs:
     name: ${{ matrix.os }} · ${{ matrix.config }}
     if: github.event_name != 'delete' && github.event_name != 'release'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Test steps are bounded explicitly: swift-testing's time limit only
+    # cancels the task, and a wait blocked in the kernel ignores cancellation,
+    # so a hang is ended by the step timeout (the runner kills the step's
+    # process and the hosted VM is discarded). The job timeout backs that up.
+    # Normal test steps take under a minute; both bounds carry ~5x headroom.
+    timeout-minutes: 15
     # macOS needs the xcode-27 image: Xcode 26.x ships Swift 6.3 and cannot
     # load a 6.4 tools-version manifest. Linux is blocking: the dedicated
     # executor owns a Thread(block:) instead of subclassing Thread, and
@@ -81,6 +86,7 @@ jobs:
       # until the toolchain carries swiftlang/swift#94425.
       - name: Test (ThreadSanitizer, Linux)
         if: matrix.config == 'debug' && runner.os == 'Linux'
+        timeout-minutes: 5
         run: |
           swift_bin=$(readlink -f "$(command -v swift)")
           toolchain_bin=$(dirname "$swift_bin")
@@ -88,6 +94,7 @@ jobs:
           swift test -c debug --sanitize=thread
       - name: Test (ThreadSanitizer, macOS)
         if: matrix.config == 'debug' && runner.os != 'Linux'
+        timeout-minutes: 5
         env:
           TSAN_OPTIONS: symbolize=0
         run: swift test -c debug --sanitize=thread
@@ -96,6 +103,7 @@ jobs:
         run: swift build -c ${{ matrix.config }}
       - name: Test
         if: matrix.config != 'debug'
+        timeout-minutes: 5
         run: swift test -c ${{ matrix.config }}
 
   # setup-swift does not install Swift 6 on Windows (v2 stops at 5.6.3 and v3
@@ -106,7 +114,7 @@ jobs:
     name: windows-2022
     if: github.event_name != 'delete' && github.event_name != 'release'
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - name: Set up Swift
@@ -119,6 +127,9 @@ jobs:
       - name: Build
         run: swift build
       - name: Test
+        # Windows `timeout` is a wait command, not a guard; the step timeout
+        # is the only per-step bound here (the job timeout remains 15 min).
+        timeout-minutes: 5
         run: swift test
 
   apple-platforms:
@@ -126,7 +137,7 @@ jobs:
     if: github.event_name != 'delete' && github.event_name != 'release'
     # Xcode 27 is the first Xcode with the Swift 6.4 toolchain.
     runs-on: xcode-27
-    timeout-minutes: 30
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
