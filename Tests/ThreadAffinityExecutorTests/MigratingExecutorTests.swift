@@ -749,10 +749,12 @@ private func stop(_ host: AttachedHost) async {
   await oldBound.stopAndJoin()
 }
 
-/// Reads of the published thread race the switch: a sampler observes only
-/// the old or the new thread id, and both across a migration — the atomic
-/// never yields a third or a torn value.
-@Test func currentThreadIDSamplingSeesOnlyOldThenNew() async throws {
+/// `currentThreadID` is read concurrently with the migration's publish: a
+/// sampler on its own thread keeps reading across the switch, so it may only
+/// ever observe the old or the new thread id. The reads straddle the store —
+/// whether one lands inside its window is up to scheduling — which is what
+/// gives the sanitizers a store/load pair to check.
+@Test func currentThreadIDSamplingSeesOnlyOldAndNew() async throws {
   let oldBound = ManualBound(name: "tae-migrate-first")
   let newBound = try DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: oldBound)
@@ -762,20 +764,35 @@ private func stop(_ host: AttachedHost) async {
   let sawOld = DispatchSemaphore(value: 0)
   let sawNew = DispatchSemaphore(value: 0)
   let stop = Atomic<Bool>(false)
+  let finished = DispatchSemaphore(value: 0)
 
-  let sampler = Task.detached {
+  let sampler = Thread {
+    defer { finished.signal() }
+    var last: ThreadID?
     while !stop.load(ordering: .acquiring) {
       let value = executor.currentThreadID
       values.with { _ = $0.insert(value) }
-      if value == oldThread {
-        sawOld.signal()
+      if value != last {
+        last = value
+        if value == oldThread {
+          sawOld.signal()
+        }
+        if value == newThread {
+          sawNew.signal()
+        }
       }
-      if value == newThread {
-        sawNew.signal()
-      }
+      // Sampling cadence, not synchronization: nothing waits on the pace,
+      // only on the reads continuing until the switch is observed.
+      Thread.sleep(forTimeInterval: 0.0005)
     }
   }
-  await waitForSignal(sawOld)
+  sampler.name = "tae-sampler"
+  sampler.start()
+
+  // Only start the migration once the sampler has read the old id, so the
+  // later reads are known to straddle the switch.
+  await waitForSignal(
+    sawOld, timeout: 10, "the sampler never observed the old thread id")
 
   let migration = Task {
     try await executor.migrate(to: newBound)
@@ -783,10 +800,11 @@ private func stop(_ host: AttachedHost) async {
   await waitForSignal(oldBound.received)
   oldBound.permit(1)
   try await migration.value
-  await waitForSignal(sawNew)
+  await waitForSignal(
+    sawNew, timeout: 10, "the sampler never observed the new thread id")
 
   stop.store(true, ordering: .releasing)
-  await sampler.value
+  await waitForSignal(finished, timeout: 10, "the sampler did not stop")
 
   #expect(values.get() == [oldThread, newThread])
 
