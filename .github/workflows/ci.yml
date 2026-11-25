@@ -42,6 +42,10 @@ jobs:
     name: ${{ matrix.os }} · ${{ matrix.config }}
     if: github.event_name != 'delete' && github.event_name != 'release'
     runs-on: ${{ matrix.os }}
+    # Test steps are bounded explicitly: swift-testing's time limit only
+    # cancels the task, and a wait blocked in the kernel ignores cancellation,
+    # so a hang is ended by the step timeout (the runner kills the step's
+    # process and the hosted VM is discarded). The job timeout backs that up.
     timeout-minutes: 30
     # macOS needs the xcode-27 image: Xcode 26.x ships Swift 6.3 and cannot
     # load a 6.4 tools-version manifest. Linux is blocking: the dedicated
@@ -81,6 +85,7 @@ jobs:
       # until the toolchain carries swiftlang/swift#94425.
       - name: Test (ThreadSanitizer, Linux)
         if: matrix.config == 'debug' && runner.os == 'Linux'
+        timeout-minutes: 15
         run: |
           swift_bin=$(readlink -f "$(command -v swift)")
           toolchain_bin=$(dirname "$swift_bin")
@@ -88,6 +93,7 @@ jobs:
           swift test -c debug --sanitize=thread
       - name: Test (ThreadSanitizer, macOS)
         if: matrix.config == 'debug' && runner.os != 'Linux'
+        timeout-minutes: 15
         env:
           TSAN_OPTIONS: symbolize=0
         run: swift test -c debug --sanitize=thread
@@ -96,6 +102,7 @@ jobs:
         run: swift build -c ${{ matrix.config }}
       - name: Test
         if: matrix.config != 'debug'
+        timeout-minutes: 15
         run: swift test -c ${{ matrix.config }}
 
   # setup-swift does not install Swift 6 on Windows (v2 stops at 5.6.3 and v3
@@ -119,6 +126,9 @@ jobs:
       - name: Build
         run: swift build
       - name: Test
+        # Windows `timeout` is a wait command, not a guard; the step timeout
+        # is the only per-step bound here (the job timeout remains 30 min).
+        timeout-minutes: 15
         run: swift test
 
   apple-platforms:
