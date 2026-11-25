@@ -84,28 +84,29 @@ public final class MigratingThreadExecutor: ThreadAffinityExecutor {
   private struct Routing {
     /// The bound executor direct submissions go to.
     var target: any ThreadBoundExecutor
-    /// The thread reported through `ThreadAffinityExecutor`. Switches when
-    /// the barrier ran, not when routing stopped.
-    var publishedThreadID: ThreadID
     /// Non-nil while a migration is in flight: the jobs accepted since
     /// routing stopped, in acceptance order.
     var staged: [UnownedJob]?
   }
 
   private let routing: Mutex<Routing>
+  /// The thread reported through `ThreadAffinityExecutor`, kept out of the
+  /// routing lock: isolation checks read it on a hot path, and its switch
+  /// point is the release, not the routing flip. Switches when the barrier
+  /// ran, not when routing stopped.
+  private let publishedThread = Atomic<UInt64>(0)
 
   /// Routes jobs to `bound`, which must already be published — its
   /// `threadID` is read here.
   public init(bound: any ThreadBoundExecutor) {
-    routing = Mutex(
-      Routing(target: bound, publishedThreadID: bound.threadID, staged: nil)
-    )
+    routing = Mutex(Routing(target: bound, staged: nil))
+    publishedThread.store(bound.threadID.rawValue, ordering: .releasing)
   }
 
   /// The thread this executor's jobs run on right now. It switches when the
   /// barrier has run, not when routing stops.
   public var currentThreadID: ThreadID {
-    routing.withLock { $0.publishedThreadID }
+    ThreadID(rawValue: publishedThread.load(ordering: .acquiring))
   }
 
   public func enqueue(_ job: consuming ExecutorJob) {
@@ -154,8 +155,7 @@ public final class MigratingThreadExecutor: ThreadAffinityExecutor {
   private func releaseStagedJobs(to newBound: any ThreadBoundExecutor) {
     // The current thread switches here: nothing accepted earlier is still
     // running, and the first job released below lands on the new thread.
-    let newThreadID = newBound.threadID
-    routing.withLock { $0.publishedThreadID = newThreadID }
+    publishedThread.store(newBound.threadID.rawValue, ordering: .releasing)
 
     // One critical section: take the whole staging set, hand it over, and
     // turn routing direct. A job arriving meanwhile waits for the lock and
