@@ -1,13 +1,9 @@
 # swiftlang/swift#94511: on Linux, ThreadSanitizer cannot see the acquire in
 # Synchronization.Mutex's non-inlined slow path (`_lockSlow`, plain-futex),
 # so it reports false races between withLock bodies on contended Mutexes.
-# All frames below are accesses inside the same Mutex.withLock and are false
-# positives. Remove these entries once the toolchain includes the upstream
-# fix, swiftlang/swift#94425 (and its XFAIL test, swiftlang/swift#94307).
-race:fulfillSuccess
-race:awaitReady
-race:bindOwnerThread
-race:requireOwnerThread
+# The frame below is an access inside such a withLock. Remove the entry once
+# the toolchain includes the upstream fix, swiftlang/swift#94425 (and its
+# XFAIL test, swiftlang/swift#94307).
 # The routing lock: every access to `Routing` runs under `routing.withLock`,
 # and those closures carry the nested type identifier in their mangled
 # symbols (`...7Routing...`). This covers enqueue, the migration cut, and

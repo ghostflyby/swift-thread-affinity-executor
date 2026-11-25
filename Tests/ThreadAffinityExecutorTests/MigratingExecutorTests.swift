@@ -4,7 +4,7 @@
 //
 //  The migrating executor over thread-bound executors: the migration cut,
 //  staging and release order, isolation across the two identities, what
-//  follows a migration, and bound executors of either family — borrowed.
+//  follows a migration, and borrowed bound executors.
 //
 
 import Foundation
@@ -193,50 +193,8 @@ private func sampleThreads(
   }
 }
 
-/// An attached executor and the pump its thread runs.
-private struct AttachedHost: Sendable {
-  let executor: AttachedThreadExecutor
-  let dispatcher: QueueDispatcher
-}
-
-/// Hands an executor created on the pump thread back to its spawner; the
-/// executor is written before the signal and read after the wait.
-private final class AttachBootstrap: @unchecked Sendable {
-  let ready = DispatchSemaphore(value: 0)
-  var executor: AttachedThreadExecutor?
-
-  func publish(_ executor: AttachedThreadExecutor) {
-    self.executor = executor
-    ready.signal()
-  }
-}
-
-/// A thread the test owns, running a `QueueDispatcher` pump with an
-/// attached executor on it: a bound executor that borrows its thread,
-/// unlike the dedicated ones the other tests use.
-private func spawnAttached(_ name: String) -> AttachedHost {
-  let dispatcher = QueueDispatcher()
-  let bootstrap = AttachBootstrap()
-  let thread = Thread {
-    let executor = try! AttachedThreadExecutor.attachOnCurrentThread(to: dispatcher)
-    bootstrap.publish(executor)
-    dispatcher.run()
-  }
-  thread.name = name
-  thread.start()
-  bootstrap.ready.wait()
-  return AttachedHost(executor: bootstrap.executor!, dispatcher: dispatcher)
-}
-
-/// Ends an attached host: the attachment detaches — its finalize runs
-/// through the pump — and the pump's `run()` then returns.
-private func stop(_ host: AttachedHost) async {
-  _ = await detach(host.executor)
-  host.dispatcher.stop()
-}
-
-@Test func jobsRunOnTheInitialBoundThread() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+@Test func jobsRunOnTheInitialBoundThread() async {
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
   let executor = MigratingThreadExecutor(bound: first)
   #expect(executor.currentThreadID == first.threadID)
 
@@ -248,8 +206,8 @@ private func stop(_ host: AttachedHost) async {
 }
 
 @Test func migrationMovesSubsequentJobsToTheNewBoundThread() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: first)
 
   try await executor.migrate(to: second)
@@ -270,7 +228,7 @@ private func stop(_ host: AttachedHost) async {
 /// reports sent after it are served by the new thread.
 @Test func migrationIDsAcrossTheCut() async throws {
   let oldBound = ManualBound(name: "tae-migrate-first")
-  let newBound = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let newBound = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: oldBound)
   let oldThread = oldBound.threadID
 
@@ -322,8 +280,8 @@ private func stop(_ host: AttachedHost) async {
 /// blocking any thread.
 @Test func concurrentMigrationReportsBusy() async throws {
   let oldBound = ManualBound(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
-  let third = try DedicatedThreadExecutor(name: "tae-migrate-third")
+  let second = DedicatedThreadExecutor(name: "tae-migrate-second")
+  let third = DedicatedThreadExecutor(name: "tae-migrate-third")
   let executor = MigratingThreadExecutor(bound: oldBound)
 
   let migration = Task {
@@ -355,8 +313,8 @@ private func stop(_ host: AttachedHost) async {
 /// Awaiting `migrate` from a task bound to the executor is safe: the
 /// caller resumes on the new bound thread, behind the released jobs.
 @Test func migrateAwaitedFromOnExecutorContextResumesOnTheNewThread() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: first)
   let threads = TestBox<[ThreadID]>([])
 
@@ -373,8 +331,8 @@ private func stop(_ host: AttachedHost) async {
 }
 
 @Test func actorBoundToTheExecutorSurvivesMigration() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: first)
   let counter = MigrationCounter(executor: executor)
 
@@ -396,8 +354,8 @@ private func stop(_ host: AttachedHost) async {
 /// as the bound executor while the counter names the migrating executor, so
 /// the identities never match and only the thread-based check accepts it.
 @Test func assumeIsolatedFromTheCurrentThreadIsAccepted() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: first)
   let counter = MigrationCounter(executor: executor)
 
@@ -426,8 +384,8 @@ private func stop(_ host: AttachedHost) async {
 /// The isolation check follows the current thread: positive from a job on
 /// it, negative anywhere else, and it moves with a migration.
 @Test func isolationChecksFollowTheCurrentThread() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: first)
 
   #expect(executor.isIsolatingCurrentContext() == false)
@@ -450,8 +408,8 @@ private func stop(_ host: AttachedHost) async {
 
 /// A task suspended when the cut passes resumes on the new bound thread.
 @Test func tasksSuspendedAcrossTheCutResumeOnTheNewThread() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: first)
   let gate = DispatchSemaphore(value: 0)
   let threads = TestBox<[ThreadID]>([])
@@ -482,8 +440,8 @@ private func stop(_ host: AttachedHost) async {
 /// unstructured task spawned from actor-isolated code whose body uses the
 /// actor — it is an actor job and takes the actor's executor.
 @Test func structuredChildrenAndActorSpawnedTasksFollowMigration() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: first)
   let counter = MigrationCounter(executor: executor)
   let gate = DispatchSemaphore(value: 0)
@@ -534,8 +492,8 @@ private func stop(_ host: AttachedHost) async {
 /// `async let` children, like task-group children, inherit the executor they
 /// were created under and follow a migration.
 @Test func asyncLetChildrenFollowMigration() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: first)
   let gate = DispatchSemaphore(value: 0)
   let running = DispatchSemaphore(value: 0)
@@ -567,8 +525,8 @@ private func stop(_ host: AttachedHost) async {
 /// bound thread, and so does everything up to the end of the outer scope.
 /// After the outer scope the task is back on the executor it had before.
 @Test func nestedScopesFollowMigration() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: first)
   let threads = TestBox<[ThreadID]>([])
   let gate = DispatchSemaphore(value: 0)
@@ -613,8 +571,8 @@ private func stop(_ host: AttachedHost) async {
 /// touch. Structured children, tasks that are actor jobs, or an explicit
 /// `withTaskExecutorPreference` are what follow the executor.
 @Test func unstructuredTasksDoNotInheritTheExecutor() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: first)
   let counter = MigrationCounter(executor: executor)
   let created = 8
@@ -647,8 +605,8 @@ private func stop(_ host: AttachedHost) async {
 /// deterministically by `migrationIDsAcrossTheCut`; here both sides are kept
 /// non-empty by the awaited pre-cut job and the post-release sample.
 @Test func jobsSerializeAcrossTheCutUnderRacingProducers() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: first)
   let threads = TestBox<[ThreadID]>([])
   let racing = 200
@@ -693,7 +651,7 @@ private func stop(_ host: AttachedHost) async {
 /// executor: it waits behind another client's job on the same executor.
 @Test func migrationWaitsForTheBoundExecutorsOwnBacklog() async throws {
   let oldBound = ManualBound(name: "tae-migrate-first")
-  let newBound = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let newBound = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: oldBound)
   let order = TestBox<[String]>([])
   let hold = DispatchSemaphore(value: 0)
@@ -734,7 +692,7 @@ private func stop(_ host: AttachedHost) async {
 /// the migration still returns, with the staged jobs discarded.
 @Test func migratingToAStoppedBoundReturns() async throws {
   let oldBound = ManualBound(name: "tae-migrate-first")
-  let stopped = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let stopped = DedicatedThreadExecutor(name: "tae-migrate-second")
   await stopped.shutdown()
   let executor = MigratingThreadExecutor(bound: oldBound)
 
@@ -756,7 +714,7 @@ private func stop(_ host: AttachedHost) async {
 /// gives the sanitizers a store/load pair to check.
 @Test func currentThreadIDSamplingSeesOnlyOldAndNew() async throws {
   let oldBound = ManualBound(name: "tae-migrate-first")
-  let newBound = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let newBound = DedicatedThreadExecutor(name: "tae-migrate-second")
   let executor = MigratingThreadExecutor(bound: oldBound)
   let oldThread = oldBound.threadID
   let newThread = newBound.threadID
@@ -815,8 +773,8 @@ private func stop(_ host: AttachedHost) async {
 /// Bound executors are borrowed: one migrating executor leaving does not
 /// disturb another on the same bound executor, and two can converge on one.
 @Test func migrationLeavesTheOldBoundExecutorServing() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
-  let second = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
+  let second = DedicatedThreadExecutor(name: "tae-migrate-second")
   let departing = MigratingThreadExecutor(bound: first)
   let staying = MigratingThreadExecutor(bound: first)
 
@@ -835,38 +793,10 @@ private func stop(_ host: AttachedHost) async {
   await second.shutdown()
 }
 
-/// A bound executor need not own its thread: attached executors on borrowed
-/// pump threads serve on either side of a migration, and the one left behind
-/// stays attached to its own clients.
-@Test func migrationMovesBetweenAttachedExecutors() async throws {
-  let first = spawnAttached("tae-migrate-first")
-  let second = spawnAttached("tae-migrate-second")
-  let executor = MigratingThreadExecutor(bound: first.executor)
-  #expect(executor.currentThreadID == first.executor.threadID)
-
-  let before = await sampleThreads(executor, count: 8)
-  #expect(before.allSatisfy { $0 == first.executor.threadID })
-
-  try await executor.migrate(to: second.executor)
-
-  #expect(executor.currentThreadID == second.executor.threadID)
-  let after = await sampleThreads(executor, count: 8)
-  #expect(after.allSatisfy { $0 == second.executor.threadID })
-
-  // The attachment left behind still serves its own clients.
-  let direct = await withTaskExecutorPreference(first.executor) {
-    ThreadID.current
-  }
-  #expect(direct == first.executor.threadID)
-
-  await stop(first)
-  await stop(second)
-}
-
 /// Migrating to the executor already in place is a plain barrier: the
 /// accepted backlog completes, then serving continues on the same thread.
 @Test func migratingToTheCurrentBoundExecutorQuiesces() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
   let executor = MigratingThreadExecutor(bound: first)
 
   try await executor.migrate(to: first)
@@ -878,8 +808,8 @@ private func stop(_ host: AttachedHost) async {
   await first.shutdown()
 }
 
-@Test func bothExecutorFamiliesAreThreadAffinityExecutors() async throws {
-  let first = try DedicatedThreadExecutor(name: "tae-migrate-first")
+@Test func bothExecutorFamiliesAreThreadAffinityExecutors() async {
+  let first = DedicatedThreadExecutor(name: "tae-migrate-first")
   let executor = MigratingThreadExecutor(bound: first)
   let executors: [any ThreadAffinityExecutor] = [first, executor]
 

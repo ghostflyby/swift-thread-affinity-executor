@@ -46,7 +46,7 @@ public enum MigrationError: Error, Sendable, Equatable {
 ///
 /// **Bound executors are borrowed.** A bound executor may serve other
 /// clients before, during and after; a migration neither ends it nor
-/// touches its lifecycle. Ending it stays with its holder.
+/// changes how it runs. Ending it stays with its holder.
 ///
 /// **Contract on the bound executors.** They must run jobs in acceptance
 /// order (the barrier is a job), keep running the jobs they accepted, and

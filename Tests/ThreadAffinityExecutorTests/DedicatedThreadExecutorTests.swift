@@ -10,94 +10,31 @@ import Testing
 
 // MARK: - Startup / shutdown
 
-@Test func initPublishesRunningExecutor() throws {
-  let executor = try DedicatedThreadExecutor(name: "tae-basic")
+@Test func initPublishesRunningExecutor() {
+  let executor = DedicatedThreadExecutor(name: "tae-basic")
   #expect(!executor.hasFinished)
   #expect(executor.threadID != ThreadID.current)
   executor.shutdown()
   #expect(executor.hasFinished)
 }
 
-@Test func shutdownIsIdempotent() throws {
-  let executor = try DedicatedThreadExecutor(name: "tae-idempotent")
+@Test func shutdownIsIdempotent() {
+  let executor = DedicatedThreadExecutor(name: "tae-idempotent")
   executor.shutdown()
   executor.shutdown()
   #expect(executor.hasFinished)
 }
 
-@Test func concurrentInitsAreSafe() async throws {
-  try await withThrowingTaskGroup(of: Void.self) { group in
+@Test func concurrentInitsAreSafe() async {
+  await withTaskGroup(of: Void.self) { group in
     for index in 0..<8 {
       group.addTask {
-        let executor = try DedicatedThreadExecutor(name: "tae-concurrent-\(index)")
+        let executor = DedicatedThreadExecutor(name: "tae-concurrent-\(index)")
         #expect(executor.threadID != ThreadID.current)
         await executor.shutdown()
       }
     }
-    try await group.waitForAll()
   }
-}
-
-// MARK: - Initialization model
-
-/// The lifecycle's `initialize` runs exactly once on the bound thread,
-/// before any job.
-@Test func initializeRunsOnceBeforeFirstJobOnBoundThread() async throws {
-  let initializerThreads = TestBox<[ThreadID]>([])
-  let executor = try DedicatedThreadExecutor(
-    name: "tae-init",
-    lifecycle: ClosureLifecycle {
-      initializerThreads.with { $0.append(ThreadID.current) }
-    }
-  )
-  #expect(initializerThreads.get().count == 1)
-
-  let jobThread = await withTaskExecutorPreference(executor) {
-    ThreadID.current
-  }
-  #expect(jobThread == initializerThreads.get().first)
-  #expect(jobThread == executor.threadID)
-  await executor.shutdown()
-}
-
-private struct InitializationFailed: Error {}
-
-/// An `initialize` error fails construction: rethrown to the caller, no
-/// executor published, `finalize` never runs.
-@Test func initializationFailurePropagatesAndSkipsFinalize() throws {
-  let finalized = TestBox(false)
-  #expect(throws: InitializationFailed.self) {
-    _ = try DedicatedThreadExecutor(
-      name: "tae-init-fail",
-      lifecycle: ClosureLifecycle(
-        initialize: { throw InitializationFailed() },
-        finalize: { finalized.set(true) }
-      )
-    )
-  }
-  #expect(finalized.get() == false)
-}
-
-/// The lifecycle's `finalize` runs on the bound thread after the queue
-/// drained.
-@Test func finalizeRunsAfterDrainOnBoundThread() async throws {
-  let jobThread = TestBox<ThreadID?>(nil)
-  let finalThread = TestBox<ThreadID?>(nil)
-  let executor = try DedicatedThreadExecutor(
-    name: "tae-finalize",
-    lifecycle: ClosureLifecycle(
-      finalize: { finalThread.set(ThreadID.current) }
-    )
-  )
-
-  await withTaskExecutorPreference(executor) {
-    jobThread.set(ThreadID.current)
-  }
-
-  // shutdown() joins the exit epilogue: finalize has completed here.
-  await executor.shutdown()
-  #expect(finalThread.get() == jobThread.get())
-  #expect(finalThread.get() == executor.threadID)
 }
 
 // MARK: - Thread binding
@@ -105,7 +42,7 @@ private struct InitializationFailed: Error {}
 /// Many consecutive jobs always read the same TID,
 /// which is the executor's published one.
 @Test func jobsRunOnBoundThread() async throws {
-  let executor = try DedicatedThreadExecutor(name: "tae-binding")
+  let executor = DedicatedThreadExecutor(name: "tae-binding")
 
   let observed: [ThreadID] = try await withTaskExecutorPreference(executor) {
     try await withThrowingTaskGroup(of: ThreadID.self) { group in
@@ -127,8 +64,8 @@ private struct InitializationFailed: Error {}
 
 /// Concurrent submitters, exactly-once
 /// execution, no data race in shared state, all on a single OS thread.
-@Test func jobExecutionIsExactlyOnceUnderConcurrency() async throws {
-  let executor = try DedicatedThreadExecutor(name: "tae-serial")
+@Test func jobExecutionIsExactlyOnceUnderConcurrency() async {
+  let executor = DedicatedThreadExecutor(name: "tae-serial")
   let counter = ThreadSafeCounter()
   let threadsSeen = TestBox<Set<ThreadID>>([])
 
@@ -153,16 +90,16 @@ private struct InitializationFailed: Error {}
 // MARK: - Isolation checks
 
 /// Off the bound thread the check is negative.
-@Test func isolationCheckIsNegativeOffBoundThread() throws {
-  let executor = try DedicatedThreadExecutor(name: "tae-negative")
+@Test func isolationCheckIsNegativeOffBoundThread() {
+  let executor = DedicatedThreadExecutor(name: "tae-negative")
   #expect(executor.isIsolatingCurrentContext() == false)
   executor.shutdown()
 }
 
 /// On the bound thread the check is
 /// positive and thread-based (not executor-identity based).
-@Test func isolationCheckIsPositiveOnBoundThread() async throws {
-  let executor = try DedicatedThreadExecutor(name: "tae-positive")
+@Test func isolationCheckIsPositiveOnBoundThread() async {
+  let executor = DedicatedThreadExecutor(name: "tae-positive")
 
   let positive = await withTaskExecutorPreference(executor) {
     executor.isIsolatingCurrentContext()
@@ -174,8 +111,8 @@ private struct InitializationFailed: Error {}
 
 /// Jobs accepted before shutdown all execute; the
 /// thread finishes and `shutdown` returns.
-@Test func shutdownDrainsAcceptedJobs() async throws {
-  let executor = try DedicatedThreadExecutor(name: "tae-drain")
+@Test func shutdownDrainsAcceptedJobs() async {
+  let executor = DedicatedThreadExecutor(name: "tae-drain")
   let counter = ThreadSafeCounter()
 
   await withTaskExecutorPreference(executor) {
@@ -196,37 +133,33 @@ private struct InitializationFailed: Error {}
   #expect(executor.hasFinished)
 }
 
-/// The async shutdown resumes only after the exit epilogue: `finalize`
-/// blocks on a gate, and the shutdown task has not returned while it is
-/// held. A second call after the exit resolves immediately.
-@Test func asyncShutdownResumesOnlyAfterExit() async throws {
-  let finalizeStarted = DispatchSemaphore(value: 0)
-  let finalizeRelease = DispatchSemaphore(value: 0)
-  let finalizeDone = TestBox(false)
-  let executor = try DedicatedThreadExecutor(
-    name: "tae-async-shutdown",
-    lifecycle: ClosureLifecycle(
-      finalize: {
-        finalizeStarted.signal()
-        finalizeRelease.wait()
-        finalizeDone.set(true)
-      }
-    )
-  )
+/// The async shutdown suspends until the worker drained: a bound job holds
+/// the thread, and the shutdown task has not returned while it runs.
+/// A second call after the exit resolves immediately.
+@Test func asyncShutdownSuspendsUntilDrain() async {
+  let executor = DedicatedThreadExecutor(name: "tae-async-shutdown")
+  let jobStarted = DispatchSemaphore(value: 0)
+  let jobRelease = DispatchSemaphore(value: 0)
+  let job = Task {
+    await withTaskExecutorPreference(executor) {
+      jobStarted.signal()
+      blockingWait(jobRelease)
+    }
+  }
+
+  await waitForSignal(jobStarted)
   let returned = TestBox(false)
   let shutdown = Task {
     await executor.shutdown()
     returned.set(true)
   }
-
-  await waitForSignal(finalizeStarted)
-  // finalize is running and held: the caller must not have resumed.
+  // The job is running and held: the drain has not completed.
   #expect(returned.get() == false)
 
-  finalizeRelease.signal()
+  jobRelease.signal()
+  await job.value
   await shutdown.value
   #expect(returned.get())
-  #expect(finalizeDone.get())
   #expect(executor.hasFinished)
 
   // After the exit the wait resolves immediately.
@@ -234,31 +167,73 @@ private struct InitializationFailed: Error {}
 }
 
 /// The async shutdown does not respond to cancellation: a cancelled caller
-/// still resumes, normally, once the exit epilogue completed.
-@Test func asyncShutdownDoesNotRespondToCancellation() async throws {
-  let finalizeStarted = DispatchSemaphore(value: 0)
-  let finalizeRelease = DispatchSemaphore(value: 0)
-  let executor = try DedicatedThreadExecutor(
-    name: "tae-async-cancel",
-    lifecycle: ClosureLifecycle(
-      finalize: {
-        finalizeStarted.signal()
-        finalizeRelease.wait()
-      }
-    )
-  )
+/// still resumes, normally, once the worker drained and exited.
+@Test func asyncShutdownDoesNotRespondToCancellation() async {
+  let executor = DedicatedThreadExecutor(name: "tae-async-cancel")
+  let jobStarted = DispatchSemaphore(value: 0)
+  let jobRelease = DispatchSemaphore(value: 0)
+  let job = Task {
+    await withTaskExecutorPreference(executor) {
+      jobStarted.signal()
+      blockingWait(jobRelease)
+    }
+  }
+
+  await waitForSignal(jobStarted)
   let returned = TestBox(false)
   let shutdown = Task {
     await executor.shutdown()
     returned.set(true)
   }
-
-  await waitForSignal(finalizeStarted)
   shutdown.cancel()
   #expect(shutdown.isCancelled)
   #expect(returned.get() == false)
 
-  finalizeRelease.signal()
+  jobRelease.signal()
+  await job.value
   await shutdown.value
   #expect(returned.get())
 }
+
+/// Blocking wait usable from a job body on a dedicated thread.
+private func blockingWait(_ semaphore: DispatchSemaphore) {
+  semaphore.wait()
+}
+
+#if canImport(Darwin)
+  private final class AutoreleaseProbe: NSObject {
+    private let onDeinit: @Sendable () -> Void
+
+    init(onDeinit: @escaping @Sendable () -> Void) {
+      self.onDeinit = onDeinit
+    }
+
+    deinit {
+      onDeinit()
+    }
+  }
+
+  /// Each job drains its own autoreleased objects before the next job
+  /// starts.
+  @Test func jobDrainsAutoreleasedObjectsPerWorkItem() async {
+    let order = TestBox<[String]>([])
+    let executor = DedicatedThreadExecutor(name: "tae-autorelease")
+
+    await withTaskExecutorPreference(executor) {
+      let probe = AutoreleaseProbe {
+        order.with { $0.append("deinit") }
+      }
+      // `passRetained` + `autorelease` puts the probe in the thread's
+      // current pool; the pool's drain owns the release that deinitializes
+      // it after this job returns.
+      _ = Unmanaged.passRetained(probe).autorelease()
+      order.with { $0.append("first") }
+    }
+    await withTaskExecutorPreference(executor) {
+      order.with { $0.append("second") }
+    }
+    await executor.shutdown()
+
+    #expect(order.get() == ["first", "deinit", "second"])
+  }
+#endif

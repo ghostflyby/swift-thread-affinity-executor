@@ -3,8 +3,8 @@
 //  ThreadAffinityExecutor
 //
 //  One-shot latch carrying "the bound thread finished its exit epilogue"
-//  from the worker to `shutdown()`, which joins on it so callers are
-//  sequenced after `finalize`. Waiters may block or suspend.
+//  from the worker to `shutdown()`, which joins on it. Waiters may block or
+//  suspend.
 //
 
 import Foundation

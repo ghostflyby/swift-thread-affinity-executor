@@ -2,65 +2,40 @@
 //  StartupHandshake.swift
 //  ThreadAffinityExecutor
 //
-//  One-shot handshake carrying the bound thread's `ThreadID` and the
-//  outcome of the on-thread initialization from the freshly started worker
-//  thread to the thread constructing the executor. Blocking variant used
-//  by `DedicatedThreadExecutor`'s synchronous initializer; attached
-//  executors publish through `AttachedThreadState`.
+//  One-shot handshake carrying the bound thread's `ThreadID` from the
+//  freshly started worker thread to the thread constructing the executor.
+//  Blocking handshake used by `DedicatedThreadExecutor`'s initializer.
 //
 
 import Foundation
 
 final class StartupHandshake: @unchecked Sendable {
-  private enum Outcome {
-    case ready(ThreadID)
-    case failed(Error)
-  }
-
   private let condition = NSCondition()
-  private var outcome: Outcome?
+  private var publishedThreadID: ThreadID?
 
-  /// Called on the bound thread after on-thread initialization succeeded.
-  func publishSuccess(_ id: ThreadID) {
+  /// Called on the bound thread once it starts servicing.
+  func publish(_ id: ThreadID) {
     condition.lock()
-    outcome = .ready(id)
+    publishedThreadID = id
     condition.unlock()
     condition.broadcast()
   }
 
-  /// Called on the bound thread when on-thread initialization threw; the
-  /// failing executor is never published.
-  func publishFailure(_ error: Error) {
+  /// Blocks until the bound thread published its ID.
+  func awaitReady() {
     condition.lock()
-    outcome = .failed(error)
-    condition.unlock()
-    condition.broadcast()
-  }
-
-  /// Blocks until an outcome was published: returns on success, rethrows
-  /// the initialization error otherwise.
-  func awaitReady() throws {
-    condition.lock()
-    while outcome == nil {
+    while publishedThreadID == nil {
       condition.wait()
     }
-    let published = outcome!
     condition.unlock()
-    switch published {
-    case .ready:
-      return
-    case .failed(let error):
-      throw error
-    }
   }
 
-  /// The published thread ID. Traps before a successful handshake —
-  /// instances only become reachable through the constructor that awaits
-  /// the handshake.
+  /// The published thread ID. Traps before the handshake — instances only
+  /// become reachable through the constructor that awaits it.
   var threadID: ThreadID {
     condition.lock()
     defer { condition.unlock() }
-    guard case .ready(let publishedThreadID) = outcome else {
+    guard let publishedThreadID else {
       preconditionFailure("ThreadID read before the bound thread published it")
     }
     return publishedThreadID
