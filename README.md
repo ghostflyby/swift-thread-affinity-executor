@@ -1,6 +1,6 @@
 # ThreadAffinityExecutor
 
-Thread-affinity executors for Swift Concurrency: at any moment, every job accepted by one of these executors runs on one known OS thread. A `ThreadBoundExecutor` keeps that thread for its whole lifetime; a `MigratingThreadExecutor` changes it only through an explicit migration. The bound thread can be created by the library, provided by the caller, or borrowed from an existing fixed-thread mechanism.
+Thread-affinity executors for Swift Concurrency: at any moment, every job accepted by one of these executors runs on one known OS thread. A `ThreadBoundExecutor` keeps that thread for its whole lifetime; a `MigratingThreadExecutor` changes it only through an explicit migration. The bound thread is created by the library.
 
 ## Scope
 
@@ -11,15 +11,13 @@ Thread-affinity executors for Swift Concurrency: at any moment, every job accept
 | `ThreadID` | Cross-platform OS thread ID value type | ✅ |
 | `ThreadAffinityExecutor` | Common protocol of the executor families: jobs run on one known OS thread at any moment (`currentThreadID`) | ✅ |
 | `ThreadBoundExecutor` | `ThreadAffinityExecutor` bound to one OS thread for its whole lifetime (`SerialExecutor + TaskExecutor`) | ✅ |
-| `DedicatedThreadExecutor` | Dedicated OS thread with optional on-thread `initialize`/`finalize` | ✅ |
-| `AttachedThreadExecutor` + `FixedThreadDispatcher` | Attach to any fixed thread with a `post` entry (main queue via `MainQueueDispatcher`, run loops, event loops); `detach()` terminates | ✅ |
-| `QueueDispatcher` | Pump for threads without an event loop | ✅ |
+| `DedicatedThreadExecutor` | Dedicated OS thread | ✅ |
 | `MigratingThreadExecutor` | One executor over a sequence of `ThreadBoundExecutor`s, exchanged through explicit migrations; bound executors are borrowed | 🔶 prototype |
 | Shutdown scopes / task tracking | Full quiescence machinery | ⏳ quiescence contract only |
 
 ## Contract
 
-> **Quiescence contract**: before `shutdown()` or `detach()`, no actor, task or external producer may submit further jobs. Queued work drains first; jobs arriving after the termination request are dropped (`enqueue` returns `false`). The library never stops borrowed threads — detach an attachment before stopping its pump.
+> **Quiescence contract**: before `shutdown()`, no actor, task or external producer may submit further jobs. Queued work drains first; jobs arriving after the termination request are dropped.
 
 ## Quick start
 
@@ -28,8 +26,7 @@ Thread-affinity executors for Swift Concurrency: at any moment, every job accept
 ```swift
 import ThreadAffinityExecutor
 
-// optional initialize/finalize run on the worker thread; an initialize error fails construction
-let executor = try DedicatedThreadExecutor(name: "worker")
+let executor = DedicatedThreadExecutor(name: "worker")
 
 actor Counter {
     nonisolated let executor: DedicatedThreadExecutor
@@ -55,31 +52,11 @@ await executor.shutdown() // suspends until the queue drained and sealed; idempo
 // the synchronous shutdown() blocks instead, for synchronous contexts
 ```
 
-### Caller-driven pump (self-attach)
-
-```swift
-let pump = QueueDispatcher()
-let executor = try AttachedThreadExecutor.attachOnCurrentThread(to: pump)
-
-// after submitting work, occupy the calling thread until pump.stop() and a drained queue:
-pump.run()
-```
-
-### Main thread / attached threads
-
-```swift
-// main thread (requires a serviced main queue, e.g. a GUI run loop or dispatchMain()):
-let mainExecutor = try await AttachedThreadExecutor.attach(to: MainQueueDispatcher())
-
-// any fixed-thread loop that provides a post entry:
-let executor = try await AttachedThreadExecutor.attach(to: myEventLoopDispatcher)
-```
-
 ### Migrating between bound executors
 
 ```swift
-let first = try DedicatedThreadExecutor(name: "first")
-let second = try DedicatedThreadExecutor(name: "second")
+let first = DedicatedThreadExecutor(name: "first")
+let second = DedicatedThreadExecutor(name: "second")
 
 // routes to `first`; actors bound to `executor` keep their binding across migrations
 let executor = MigratingThreadExecutor(bound: first)

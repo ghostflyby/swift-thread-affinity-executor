@@ -11,8 +11,8 @@ and this project adheres to
 ### Added
 
 - `DedicatedThreadExecutor.shutdown() async`: suspends the calling task
-  until the worker drained, ran `finalize` and exited, instead of blocking a
-  thread. The synchronous `shutdown()` remains for synchronous contexts.
+  until the worker drained and exited, instead of blocking a thread. The
+  synchronous `shutdown()` remains for synchronous contexts.
 - `ThreadAffinityExecutor`: the common protocol of the executor families.
   Both `ThreadBoundExecutor` and `MigratingThreadExecutor` refine it.
   `currentThreadID` names the thread this executor's jobs run on — it
@@ -31,9 +31,17 @@ and this project adheres to
 - **Breaking:** `ThreadBoundExecutor` now requires jobs to run in acceptance
   order. `SerialExecutor` alone permits reordering, and the migrating
   executor's barrier depends on it.
+- **Breaking:** `DedicatedThreadExecutor.init(name:)` no longer takes a
+  lifecycle and no longer throws. On-thread setup and teardown are the
+  caller's to compose.
 
 ### Removed
 
+- **Breaking:** the attach family and its lifecycle hooks:
+  `AttachedThreadExecutor`, `AttachError`, `FixedThreadDispatcher`,
+  `ThreadPumpDelegate`, `MainQueueDispatcher`, `QueueDispatcher`,
+  `ThreadLifecycleDelegate` and `ClosureLifecycle`. Executors no longer
+  accept caller-supplied on-thread setup or teardown.
 - **Breaking:** `ThreadGenerationDelegate` and `ClosureGenerationDelegate`,
   along with the pump-based `MigratingThreadExecutor` API: `attach(to:)`,
   `handOver(to:)`, `terminate()`, `current` and `Generation`.

@@ -49,9 +49,9 @@ actor Counter {
 
 /// A custom `unownedExecutor` drives actor methods
 /// on the dedicated thread.
-@Test func actorRunsOnBoundThread() async throws {
+@Test func actorRunsOnBoundThread() async {
   let counter = Counter(
-    executor: try DedicatedThreadExecutor(name: "tae-actor")
+    executor: DedicatedThreadExecutor(name: "tae-actor")
   )
 
   #expect(await counter.boundThreadHolds())
@@ -63,9 +63,9 @@ actor Counter {
 
 /// After suspension and resumption the actor
 /// isolation still lands on the bound thread.
-@Test func actorIsolationSurvivesSuspension() async throws {
+@Test func actorIsolationSurvivesSuspension() async {
   let counter = Counter(
-    executor: try DedicatedThreadExecutor(name: "tae-actor-hop")
+    executor: DedicatedThreadExecutor(name: "tae-actor-hop")
   )
 
   #expect(await counter.hopAwayAndComeBack())
@@ -100,9 +100,9 @@ actor Sibling {
 /// Synchronous `assumeIsolated` access
 /// from the bound thread is accepted via dynamic isolation checking — even
 /// across different actor objects sharing the thread.
-@Test func assumeIsolatedSucceedsOnBoundThread() async throws {
+@Test func assumeIsolatedSucceedsOnBoundThread() async {
   let counter = Counter(
-    executor: try DedicatedThreadExecutor(name: "tae-assume")
+    executor: DedicatedThreadExecutor(name: "tae-assume")
   )
   let sibling = Sibling(executor: counter.executor, counter: counter)
 

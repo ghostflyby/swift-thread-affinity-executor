@@ -30,9 +30,9 @@ extension ThreadAffinityExecutor {
   /// A synchronous caller running on the current thread is isolated with
   /// respect to this executor's jobs. Because the check inspects the
   /// calling thread, it also holds across executors that share the thread —
-  /// two `ThreadBoundExecutor` objects on one OS thread, or an actor bound
-  /// to a `MigratingThreadExecutor` reached from its current bound
-  /// executor.
+  /// two `ThreadBoundExecutor` conformances sharing one OS thread, or an
+  /// actor bound to a `MigratingThreadExecutor` reached from its current
+  /// bound executor.
   ///
   /// The package requires Swift 6.4, so the requirement is available on
   /// every supported platform.
