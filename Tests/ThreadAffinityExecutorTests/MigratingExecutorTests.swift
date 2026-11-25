@@ -749,6 +749,51 @@ private func stop(_ host: AttachedHost) async {
   await oldBound.stopAndJoin()
 }
 
+/// Reads of the published thread race the switch: a sampler observes only
+/// the old or the new thread id, and both across a migration — the atomic
+/// never yields a third or a torn value.
+@Test func currentThreadIDSamplingSeesOnlyOldThenNew() async throws {
+  let oldBound = ManualBound(name: "tae-migrate-first")
+  let newBound = try DedicatedThreadExecutor(name: "tae-migrate-second")
+  let executor = MigratingThreadExecutor(bound: oldBound)
+  let oldThread = oldBound.threadID
+  let newThread = newBound.threadID
+  let values = TestBox<Set<ThreadID>>([])
+  let sawOld = DispatchSemaphore(value: 0)
+  let sawNew = DispatchSemaphore(value: 0)
+  let stop = Atomic<Bool>(false)
+
+  let sampler = Task.detached {
+    while !stop.load(ordering: .acquiring) {
+      let value = executor.currentThreadID
+      values.with { _ = $0.insert(value) }
+      if value == oldThread {
+        sawOld.signal()
+      }
+      if value == newThread {
+        sawNew.signal()
+      }
+    }
+  }
+  await waitForSignal(sawOld)
+
+  let migration = Task {
+    try await executor.migrate(to: newBound)
+  }
+  await waitForSignal(oldBound.received)
+  oldBound.permit(1)
+  try await migration.value
+  await waitForSignal(sawNew)
+
+  stop.store(true, ordering: .releasing)
+  await sampler.value
+
+  #expect(values.get() == [oldThread, newThread])
+
+  await oldBound.stopAndJoin()
+  await newBound.shutdown()
+}
+
 /// Bound executors are borrowed: one migrating executor leaving does not
 /// disturb another on the same bound executor, and two can converge on one.
 @Test func migrationLeavesTheOldBoundExecutorServing() async throws {
