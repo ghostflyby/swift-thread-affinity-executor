@@ -6,6 +6,7 @@
 import Dispatch
 import Foundation
 import Synchronization
+import Testing
 
 @testable import ThreadAffinityExecutor
 
@@ -17,6 +18,42 @@ func waitForSignal(_ semaphore: DispatchSemaphore) async {
       continuation.resume()
     }
   }
+}
+
+/// Awaits `semaphore` like `waitForSignal`, but gives up after `timeout` and
+/// records a test issue rather than hanging the run.
+///
+/// The wait still runs on the global queue: parking a cooperative thread would
+/// starve the very tasks whose progress produces the signal.
+@discardableResult
+func waitForSignal(
+  _ semaphore: DispatchSemaphore,
+  timeout: TimeInterval,
+  _ message: Comment = "timed out waiting for a signal"
+) async -> Bool {
+  // Whoever exchanges first owns the continuation. A compare-exchange rather
+  // than a mutex keeps the race lock-free: Linux TSan cannot see the slow path
+  // of `Synchronization.Mutex`, and this guard is contended by design.
+  let settled = Atomic<Bool>(false)
+  let claim: @Sendable () -> Bool = { [settled] in
+    settled.compareExchange(
+      expected: false, desired: true, ordering: .acquiringAndReleasing
+    ).exchanged
+  }
+  let didSignal = await withCheckedContinuation {
+    (continuation: CheckedContinuation<Bool, Never>) in
+    DispatchQueue.global().async {
+      semaphore.wait()
+      if claim() { continuation.resume(returning: true) }
+    }
+    DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+      if claim() { continuation.resume(returning: false) }
+    }
+  }
+  if !didSignal {
+    Issue.record(message)
+  }
+  return didSignal
 }
 
 /// Runs the blocking attachment detach off the cooperative pool.
