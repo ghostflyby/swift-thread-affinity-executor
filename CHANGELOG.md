@@ -8,6 +8,8 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
 ### Added
 
 - `DedicatedThreadExecutor.shutdown() async`: suspends the calling task
@@ -105,7 +107,8 @@ and this project adheres to
 - Ownership-transfer elements: queue elements need not be `Sendable` and may
   be `~Copyable`; the handoff is compiler-checked (`sending`).
 
-[Unreleased]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.2...HEAD
+[Unreleased]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.2.0...HEAD
+[0.2.0]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.2...0.2.0
 [0.1.2]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.1...0.1.2
 [0.1.1]: https://github.com/ghostflyby/swift-thread-affinity-executor/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/ghostflyby/swift-thread-affinity-executor/releases/tag/0.1.0
