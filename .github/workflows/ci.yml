@@ -95,8 +95,12 @@ jobs:
     if: github.event_name != 'delete' && github.event_name != 'release'
     # The official image pins the toolchain and supplies swift-format; no
     # setup-swift, so no signature-check flake. Its base is Ubuntu 24.04.
+    # TSan calls personality() to disable ASLR, which Docker's default seccomp
+    # profile blocks; unconfine it for this job.
     runs-on: ubuntu-latest
-    container: swift:6.4.3
+    container:
+      image: swift:6.4.3
+      options: --security-opt seccomp=unconfined
     timeout-minutes: 15
     strategy:
       fail-fast: false
