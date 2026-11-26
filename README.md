@@ -69,6 +69,39 @@ await first.shutdown()
 await second.shutdown()
 ```
 
+The two thread-context moments are posted as typed notifications on the
+executor's own `NotificationCenter` (a fresh one per executor by default).
+With no queue the observer runs synchronously on the bound thread and must
+not block or await; a queue delivers asynchronously and the migration does
+not wait:
+
+```swift
+let leaving = executor.addObserver(for: .leavingBoundThread) { event in
+    // old thread, after the last job accepted before the cut, before the switch
+}
+executor.addObserver(for: .enteringBoundThread, queue: myQueue) { event in
+    // delivered on myQueue; omit the queue for the new bound thread
+}
+leaving.remove()
+```
+
+The center also has a type-refined observer for direct use; the
+`MigrationNotification` enum is the public identity and the underlying
+`Notification.Name` stays internal:
+
+```swift
+executor.notificationCenter.addObserver(
+    for: .leavingBoundThread, object: executor, queue: nil
+) { event in
+    // event is a MigrationEvent
+}
+```
+
+Observers registered on the executor's center with the executor as object
+are removed when it deinitializes; the executor retains their observer
+tokens until then, and removing a registration releases its handler. Capture
+the executor weakly in the handler.
+
 ### Endpoint shapes
 
 `UnboundedQueue` and `BoundedQueue` fix the endpoint shape when the

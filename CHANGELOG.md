@@ -19,6 +19,23 @@ and this project adheres to
   switches at the migration barrier, not when routing stops — and the
   thread-based `isIsolatingCurrentContext()` moved to it from
   `ThreadBoundExecutor`.
+- `MigratingThreadExecutor` migration notifications: the executor owns a
+  `NotificationCenter` (`notificationCenter`, a fresh one by default; pass
+  `notificationCenter:` to share one). The public identity is the
+  `MigrationNotification` enum: `.leavingBoundThread` is posted on the old
+  bound thread after the last job accepted before the cut and before the
+  switch is published; `.enteringBoundThread` is posted on the new bound
+  thread before the jobs released by the migration. Both carry the same
+  `MigrationEvent`, unboxed by the typed
+  `NotificationCenter.addObserver(for:object:queue:using:)` overload; the
+  underlying `Notification.Name` is internal. Observers registered with a
+  nil queue run synchronously on the bound thread; a non-nil queue delivers
+  asynchronously. Register with `addObserver(for:queue:using:)` on the
+  executor (or the center overload); the returned token removes its
+  registration with `remove()` (weak center, idempotent).
+  Observers registered on the executor's center with the executor as object
+  are removed when it deinitializes; the executor retains their observer
+  tokens until then, and removing a registration releases its handler.
 
 ### Changed
 
@@ -34,6 +51,10 @@ and this project adheres to
 - **Breaking:** `DedicatedThreadExecutor.init(name:)` no longer takes a
   lifecycle and no longer throws. On-thread setup and teardown are the
   caller's to compose.
+- **Breaking:** `MigratingThreadExecutor` always posts the entering
+  notification on the new bound, so a new bound executor that already
+  stopped leaves the migration pending instead of silently discarding the
+  staged jobs.
 
 ### Removed
 

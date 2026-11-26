@@ -97,6 +97,19 @@ private final class ManualBound: ThreadBoundExecutor, @unchecked Sendable {
   }
 }
 
+/// Records its deinitialization; proves that observer blocks were released.
+private final class DeinitProbe: Sendable {
+  private let onDeinit: @Sendable () -> Void
+
+  init(onDeinit: @escaping @Sendable () -> Void) {
+    self.onDeinit = onDeinit
+  }
+
+  deinit {
+    onDeinit()
+  }
+}
+
 /// Actor fixture bound to the migrating executor — jobs must keep flowing
 /// across migrations without rebinding.
 private actor MigrationCounter {
@@ -257,8 +270,10 @@ private func sampleThreads(
   let third = report()
 
   // The old side drains: the two reports, then the migration's own barrier,
-  // whose release hands the staged report to the new bound.
-  oldBound.permit(3)
+  // whose release hands the staged report to the new bound. The barrier
+  // resumes as a later job on the old bound after posting the entering
+  // notification on the new one.
+  oldBound.permit(4)
   try await migration.value
 
   // Sent after the release.
@@ -297,7 +312,7 @@ private func sampleThreads(
     try await executor.migrate(to: third)
   }
 
-  oldBound.permit(1)
+  oldBound.permit(2)  // barrier, then its resumption after the entering post
   try await migration.value
   #expect(executor.currentThreadID == second.threadID)
 
@@ -679,32 +694,13 @@ private func sampleThreads(
   #expect(order.get().isEmpty)
 
   hold.signal()
-  oldBound.permit(1)  // run the barrier
+  oldBound.permit(2)  // barrier, then its resumption after the entering post
   try await migration.value
   #expect(order.get() == ["other client done", "migration done"])
   #expect(executor.currentThreadID == newBound.threadID)
 
   await oldBound.stopAndJoin()
   await newBound.shutdown()
-}
-
-/// A new bound executor that already stopped accepts the release silently:
-/// the migration still returns, with the staged jobs discarded.
-@Test func migratingToAStoppedBoundReturns() async throws {
-  let oldBound = ManualBound(name: "tae-migrate-first")
-  let stopped = DedicatedThreadExecutor(name: "tae-migrate-second")
-  await stopped.shutdown()
-  let executor = MigratingThreadExecutor(bound: oldBound)
-
-  let migration = Task {
-    try await executor.migrate(to: stopped)
-  }
-  await waitForSignal(oldBound.received)
-  oldBound.permit(1)
-  try await migration.value
-  #expect(executor.currentThreadID == stopped.threadID)
-
-  await oldBound.stopAndJoin()
 }
 
 /// `currentThreadID` is read concurrently with the migration's publish: a
@@ -756,7 +752,7 @@ private func sampleThreads(
     try await executor.migrate(to: newBound)
   }
   await waitForSignal(oldBound.received)
-  oldBound.permit(1)
+  oldBound.permit(2)  // barrier, then its resumption after the entering post
   try await migration.value
   await waitForSignal(
     sawNew, timeout: 10, "the sampler never observed the new thread id")
@@ -806,6 +802,311 @@ private func sampleThreads(
   #expect(threads.allSatisfy { $0 == first.threadID })
 
   await first.shutdown()
+}
+
+// MARK: - Migration notifications
+
+/// The two notifications bracket the switch: leaving is posted on the old
+/// thread after the pre-cut job and before the switch is published; entering
+/// is posted on the new thread. Both carry the same event.
+@Test func migrationNotificationsBracketTheSwitch() async throws {
+  let oldBound = ManualBound(name: "tae-hook-old")
+  let newBound = ManualBound(name: "tae-hook-new")
+  let oldThread = oldBound.threadID
+  let newThread = newBound.threadID
+  let executor = MigratingThreadExecutor(bound: oldBound)
+  let order = TestBox<[String]>([])
+  let leavingThread = TestBox<ThreadID?>(nil)
+  let enteringThread = TestBox<ThreadID?>(nil)
+  let leavingSawOldThread = TestBox(false)
+  let enteringSawNewThread = TestBox(false)
+  let events = TestBox<[MigrationEvent]>([])
+
+  executor.addObserver(for: .leavingBoundThread) { event in
+    order.with { $0.append("leave") }
+    leavingThread.set(ThreadID.current)
+    leavingSawOldThread.set(executor.currentThreadID == oldThread)
+    events.with { $0.append(event) }
+  }
+  executor.addObserver(for: .enteringBoundThread) { event in
+    order.with { $0.append("enter") }
+    enteringThread.set(ThreadID.current)
+    enteringSawNewThread.set(executor.currentThreadID == newThread)
+    events.with { $0.append(event) }
+  }
+
+  let preCut = Task {
+    await withTaskExecutorPreference(executor) {
+      order.with { $0.append("job") }
+    }
+  }
+  await waitForSignal(oldBound.received)  // body job
+  oldBound.permit(1)
+  // Exiting the preference scope is itself a job on the preferred executor;
+  // the task's post-scope continuation then returns to the executor it had
+  // before the scope.
+  await waitForSignal(oldBound.received)  // scope-unwind job
+  oldBound.permit(1)
+  await preCut.value
+
+  let migration = Task { try await executor.migrate(to: newBound) }
+  await waitForSignal(oldBound.received)  // barrier
+  oldBound.permit(1)  // leaving notification, then the hop to the new bound
+  await waitForSignal(newBound.received)  // entering notification job
+  newBound.permit(1)  // entering notification
+  await waitForSignal(oldBound.received)  // barrier resumes
+  oldBound.permit(1)  // flush and return
+  try await migration.value
+
+  #expect(order.get() == ["job", "leave", "enter"])
+  #expect(leavingThread.get() == oldThread)
+  #expect(enteringThread.get() == newThread)
+  #expect(leavingSawOldThread.get())
+  #expect(enteringSawNewThread.get())
+  #expect(
+    events.get() == [
+      MigrationEvent(generation: 1, from: oldThread, to: newThread),
+      MigrationEvent(generation: 1, from: oldThread, to: newThread),
+    ])
+  #expect(executor.currentThreadID == newThread)
+
+  await oldBound.stopAndJoin()
+  await newBound.stopAndJoin()
+}
+
+/// Registrations accumulate, and a token removes exactly the one
+/// registration it came from.
+@Test func migrationNotificationsAccumulateAndRemoveByToken() async throws {
+  let oldBound = ManualBound(name: "tae-hook-old")
+  let newBound = ManualBound(name: "tae-hook-new")
+  let executor = MigratingThreadExecutor(bound: oldBound)
+  let order = TestBox<[String]>([])
+
+  executor.addObserver(for: .leavingBoundThread) { _ in order.with { $0.append("l1") } }
+  let removedLeaving = executor.addObserver(for: .leavingBoundThread) { _ in
+    order.with { $0.append("l2") }
+  }
+  executor.addObserver(for: .enteringBoundThread) { _ in order.with { $0.append("e1") } }
+  let removedEntering = executor.addObserver(for: .enteringBoundThread) { _ in
+    order.with { $0.append("e2") }
+  }
+  removedLeaving.remove()
+  removedLeaving.remove()
+  removedEntering.remove()
+
+  let migration = Task { try await executor.migrate(to: newBound) }
+  await waitForSignal(oldBound.received)
+  oldBound.permit(1)
+  await waitForSignal(newBound.received)
+  newBound.permit(1)
+  await waitForSignal(oldBound.received)
+  oldBound.permit(1)
+  try await migration.value
+
+  #expect(order.get() == ["l1", "e1"])
+
+  await oldBound.stopAndJoin()
+  await newBound.stopAndJoin()
+}
+
+/// Each executor owns a fresh `NotificationCenter` by default: a
+/// registration on one executor's center is not delivered for another
+/// executor's migration.
+@Test func migrationNotificationsUseTheirOwnCenter() async throws {
+  let first = DedicatedThreadExecutor(name: "tae-notify-a")
+  let second = DedicatedThreadExecutor(name: "tae-notify-b")
+  let a = MigratingThreadExecutor(bound: first)
+  let b = MigratingThreadExecutor(bound: second)
+  let calls = TestBox<[String]>([])
+
+  a.addObserver(for: .leavingBoundThread) { _ in calls.with { $0.append("a") } }
+  b.addObserver(for: .leavingBoundThread) { _ in calls.with { $0.append("b") } }
+
+  try await a.migrate(to: second)
+  #expect(calls.get() == ["a"])
+
+  try await b.migrate(to: first)
+  #expect(calls.get() == ["a", "b"])
+
+  await first.shutdown()
+  await second.shutdown()
+}
+
+/// Observers registered through the executor are removed when it
+/// deinitializes, even when the center is shared.
+@Test func migrationObserversAreRemovedWithTheExecutor() async throws {
+  let center = NotificationCenter()
+  let bound = DedicatedThreadExecutor(name: "tae-notify-cleanup")
+  let deinited = TestBox(false)
+  var executor: MigratingThreadExecutor? = MigratingThreadExecutor(
+    bound: bound,
+    notificationCenter: center
+  )
+
+  do {
+    let probe = DeinitProbe { deinited.set(true) }
+    executor?.addObserver(for: .leavingBoundThread) { _ in
+      _ = probe
+    }
+  }
+
+  #expect(deinited.get() == false)
+  executor = nil
+  #expect(deinited.get())
+
+  await bound.shutdown()
+}
+
+/// A typed observer registered with the executor as its object is removed
+/// with the executor too.
+@Test func typedMigrationObserversAreRemovedWithTheirTarget() async throws {
+  let center = NotificationCenter()
+  let bound = DedicatedThreadExecutor(name: "tae-notify-target")
+  let deinited = TestBox(false)
+  var executor: MigratingThreadExecutor? = MigratingThreadExecutor(
+    bound: bound,
+    notificationCenter: center
+  )
+
+  do {
+    let probe = DeinitProbe { deinited.set(true) }
+    _ = center.addObserver(
+      for: .leavingBoundThread,
+      object: executor,
+      queue: nil
+    ) { _ in
+      _ = probe
+    }
+  }
+
+  #expect(deinited.get() == false)
+  executor = nil
+  #expect(deinited.get())
+
+  await bound.shutdown()
+}
+
+/// A registration on a foreign center is removed by its token; the executor
+/// only cleans up its own center.
+@Test func typedObserversAreRemovedFromAForeignCenter() async throws {
+  let foreign = NotificationCenter()
+  let bound = DedicatedThreadExecutor(name: "tae-notify-foreign")
+  let deinited = TestBox(false)
+  let executor = MigratingThreadExecutor(bound: bound)
+
+  do {
+    let probe = DeinitProbe { deinited.set(true) }
+    let token = foreign.addObserver(
+      for: .leavingBoundThread,
+      object: executor,
+      queue: nil
+    ) { _ in
+      _ = probe
+    }
+    token.remove()
+  }
+  #expect(deinited.get())
+
+  await bound.shutdown()
+}
+
+/// A new bound that already stopped cannot run the entering notification:
+/// the migration stays pending, so later migrations report busy.
+@Test func migratingToAStoppedBoundStaysPending() async throws {
+  let oldBound = ManualBound(name: "tae-stopped-old")
+  let stopped = DedicatedThreadExecutor(name: "tae-stopped-new")
+  await stopped.shutdown()
+  let other = DedicatedThreadExecutor(name: "tae-stopped-other")
+  let executor = MigratingThreadExecutor(bound: oldBound)
+
+  _ = Task { try await executor.migrate(to: stopped) }
+  await waitForSignal(oldBound.received)  // barrier
+  oldBound.permit(1)  // barrier runs; the entering hop is dropped
+
+  await #expect(throws: MigrationError.busy) {
+    try await executor.migrate(to: other)
+  }
+
+  await oldBound.stopAndJoin()
+  await other.shutdown()
+}
+
+/// Same-thread migrations post both notifications, report `from == to`, and
+/// advance the generation.
+@Test func sameThreadMigrationNotificationsAdvanceGeneration() async throws {
+  let bound = DedicatedThreadExecutor(name: "tae-notify-same")
+  let thread = bound.threadID
+  let executor = MigratingThreadExecutor(bound: bound)
+  let leavingEvents = TestBox<[MigrationEvent]>([])
+  let enteringEvents = TestBox<[MigrationEvent]>([])
+
+  executor.addObserver(for: .leavingBoundThread) { event in
+    leavingEvents.with { $0.append(event) }
+  }
+  executor.addObserver(for: .enteringBoundThread) { event in
+    enteringEvents.with { $0.append(event) }
+  }
+
+  try await executor.migrate(to: bound)
+  try await executor.migrate(to: bound)
+
+  let expected = [
+    MigrationEvent(generation: 1, from: thread, to: thread),
+    MigrationEvent(generation: 2, from: thread, to: thread),
+  ]
+  #expect(leavingEvents.get() == expected)
+  #expect(enteringEvents.get() == expected)
+  #expect(executor.currentThreadID == thread)
+
+  await bound.shutdown()
+}
+
+/// A non-nil queue moves delivery off the posting bound thread.
+@Test func migrationNotificationQueueDeliveryRunsOffTheBoundThread() async throws {
+  let bound = DedicatedThreadExecutor(name: "tae-notify-queue")
+  let executor = MigratingThreadExecutor(bound: bound)
+  let queue = OperationQueue()
+  queue.maxConcurrentOperationCount = 1
+  let delivered = DispatchSemaphore(value: 0)
+  let handlerThread = TestBox<ThreadID?>(nil)
+
+  executor.addObserver(for: .leavingBoundThread, queue: queue) { _ in
+    handlerThread.set(ThreadID.current)
+    delivered.signal()
+  }
+
+  try await executor.migrate(to: bound)
+  await waitForSignal(delivered, timeout: 10, "queue delivery did not happen")
+  #expect(handlerThread.get() != nil)
+  #expect(handlerThread.get() != bound.threadID)
+
+  await bound.shutdown()
+}
+
+/// The center's typed overload observes the migration notification
+/// directly, without going through the executor's registration methods.
+@Test func migrationNotificationTypedObservation() async throws {
+  let bound = DedicatedThreadExecutor(name: "tae-notify-typed")
+  let executor = MigratingThreadExecutor(bound: bound)
+  let rawEvent = TestBox<MigrationEvent?>(nil)
+
+  let observer = executor.notificationCenter.addObserver(
+    for: .leavingBoundThread,
+    object: nil,
+    queue: nil
+  ) { event in
+    rawEvent.set(event)
+  }
+
+  try await executor.migrate(to: bound)
+
+  #expect(rawEvent.get() != nil)
+  #expect(rawEvent.get()?.generation == 1)
+  #expect(rawEvent.get()?.from == bound.threadID)
+  #expect(rawEvent.get()?.to == bound.threadID)
+
+  observer.remove()
+  await bound.shutdown()
 }
 
 @Test func bothExecutorFamiliesAreThreadAffinityExecutors() async {
