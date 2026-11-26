@@ -98,8 +98,9 @@ executor.notificationCenter.addObserver(
 ```
 
 Observers registered on the executor's center with the executor as object
-are removed when it deinitializes; capture the executor weakly in the
-handler.
+are removed when it deinitializes; the executor retains their observer
+tokens until then, and removing a registration releases its handler. Capture
+the executor weakly in the handler.
 
 ### Endpoint shapes
 

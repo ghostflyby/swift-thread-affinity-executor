@@ -34,7 +34,8 @@ and this project adheres to
   executor (or the center overload); the returned token removes its
   registration with `remove()` (weak center, idempotent).
   Observers registered on the executor's center with the executor as object
-  are removed when it deinitializes.
+  are removed when it deinitializes; the executor retains their observer
+  tokens until then, and removing a registration releases its handler.
 
 ### Changed
 

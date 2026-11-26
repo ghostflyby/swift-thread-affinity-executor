@@ -41,7 +41,7 @@ public enum MigrationNotification: Sendable, Hashable {
 extension NotificationCenter {
   /// Observes a migration notification; a nil queue runs synchronously on
   /// the posting thread. With the executor as `object` on its own center,
-  /// the observer is removed with it.
+  /// the observer is removed with it; its token is retained until then.
   @discardableResult
   public func addObserver(
     for notification: MigrationNotification,

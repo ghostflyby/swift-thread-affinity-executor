@@ -53,9 +53,11 @@ public enum MigrationError: Error, Sendable, Equatable {
 /// synchronously on the posting thread; a non-nil queue delivers
 /// asynchronously. `addObserver(for:queue:using:)` registers observers;
 /// `token.remove()` removes a registration. Observers registered on the
-/// executor's center with the executor as object are removed on deinit; a
-/// handler must not capture it strongly. NotificationCenter promises neither observer order
-/// nor a registration snapshot.
+/// executor's center with the executor as object are removed on deinit; the
+/// executor retains their observer tokens until then, while removal releases
+/// the handler block. A handler must not capture the executor strongly.
+/// NotificationCenter promises neither observer order nor a registration
+/// snapshot.
 ///
 /// **Bound executors are borrowed.** A bound executor may serve other
 /// clients before, during and after; a migration neither ends it nor
@@ -107,18 +109,18 @@ public final class MigratingThreadExecutor: ThreadAffinityExecutor {
     var staged: [UnownedJob]?
   }
 
-  /// A tracked registration: the observer is weak, so a removed
-  /// registration retains nothing.
+  /// A tracked registration. The observer token is retained so deinit can
+  /// remove it; `removeObserver` releases the handler block.
   private struct ObservationEntry: Hashable {
-    let id: UInt64
-    weak var observer: (any NSObjectProtocol)?
+    let observer: any NSObjectProtocol
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-      lhs.id == rhs.id
+      ObjectIdentifier(lhs.observer as AnyObject)
+        == ObjectIdentifier(rhs.observer as AnyObject)
     }
 
     func hash(into hasher: inout Hasher) {
-      hasher.combine(id)
+      hasher.combine(ObjectIdentifier(observer as AnyObject))
     }
   }
 
@@ -136,7 +138,6 @@ public final class MigratingThreadExecutor: ThreadAffinityExecutor {
   /// Registrations made on this executor's center with it as object; cleaned
   /// up on deinit.
   private let observations = Mutex<Set<ObservationEntry>>([])
-  private let nextObservationID = Atomic<UInt64>(0)
 
   /// Routes jobs to `bound`, which must already be published — its
   /// `threadID` is read here.
@@ -220,17 +221,15 @@ public final class MigratingThreadExecutor: ThreadAffinityExecutor {
   /// Tracks a registration made on this executor's center with the executor
   /// as its object.
   func track(_ token: MigrationHookToken) {
-    let id = nextObservationID.wrappingAdd(1, ordering: .relaxed).newValue
     observations.withLock {
-      _ = $0.insert(ObservationEntry(id: id, observer: token.observer))
+      _ = $0.insert(ObservationEntry(observer: token.observer))
     }
   }
 
   deinit {
     let entries = observations.withLock { $0 }
     for entry in entries {
-      guard let observer = entry.observer else { continue }
-      notificationCenter.removeObserver(observer)
+      notificationCenter.removeObserver(entry.observer)
     }
   }
 
