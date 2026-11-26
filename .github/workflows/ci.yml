@@ -9,7 +9,7 @@ on:
   pull_request:
   workflow_dispatch:
   # Tag deletion and release publication drive the release jobs below. The
-  # four build/test jobs are gated off these events.
+  # build/test jobs are gated off these events.
   delete:
   release:
     types: [published]
@@ -29,12 +29,17 @@ jobs:
   lint:
     name: swift-format
     if: github.event_name != 'delete' && github.event_name != 'release'
-    runs-on: macos-latest
+    # The official Swift image carries the toolchain and swift-format; a
+    # Linux runner also avoids the macOS runner queue.
+    runs-on: ubuntu-latest
+    container: swift:6.4.3
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - name: Install swift-format
-        run: brew install swift-format
+      - name: Show toolchain
+        run: |
+          swift --version
+          swift-format --version
       - name: Lint
         run: swift-format lint --recursive --strict Package.swift Sources Tests
 
@@ -49,26 +54,16 @@ jobs:
     # Normal test steps take under a minute; both bounds carry ~5x headroom.
     timeout-minutes: 15
     # macOS needs the xcode-27 image: Xcode 26.x ships Swift 6.3 and cannot
-    # load a 6.4 tools-version manifest. Linux is blocking: the dedicated
-    # executor owns a Thread(block:) instead of subclassing Thread, and
-    # ThreadID declares gettid directly.
+    # load a 6.4 tools-version manifest. Linux runs in a Swift container in
+    # the separate test-linux job.
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: xcode-27, config: debug }
           - { os: xcode-27, config: release }
-          - { os: ubuntu-24.04, config: debug }
-          - { os: ubuntu-24.04, config: release }
     steps:
       - uses: actions/checkout@v7
-      # setup-swift v2's version catalog ends at 6.2.1; v3 resolves releases
-      # through Swiftly and can install 6.4.2.
-      - name: Set up Swift
-        if: runner.os == 'Linux'
-        uses: swift-actions/setup-swift@v3
-        with:
-          swift-version: "6.4.2"
       - name: Show toolchain
         run: swift --version
       # TSan was previously quarantined because the hosted macOS test process
@@ -81,23 +76,59 @@ jobs:
         env:
           TSAN_OPTIONS: symbolize=0
         run: swift build -c debug --sanitize=thread
+      - name: Test (ThreadSanitizer, macOS)
+        if: matrix.config == 'debug'
+        timeout-minutes: 5
+        env:
+          TSAN_OPTIONS: symbolize=0
+        run: swift test -c debug --sanitize=thread
+      - name: Build
+        if: matrix.config != 'debug'
+        run: swift build -c ${{ matrix.config }}
+      - name: Test
+        if: matrix.config != 'debug'
+        timeout-minutes: 5
+        run: swift test -c ${{ matrix.config }}
+
+  test-linux:
+    name: ubuntu-24.04 · ${{ matrix.config }}
+    if: github.event_name != 'delete' && github.event_name != 'release'
+    # The official image pins the toolchain; no setup-swift, so no
+    # signature-check flake. Its base is Ubuntu 24.04. Linux is a blocking
+    # leg: the dedicated executor owns a Thread(block:) instead of
+    # subclassing Thread, and ThreadID declares gettid directly.
+    # TSan calls personality() to disable ASLR, which Docker's default seccomp
+    # profile blocks. The option covers the whole job, including the release
+    # leg, because job containers cannot scope it per step.
+    runs-on: ubuntu-latest
+    container:
+      image: swift:6.4.3
+      options: --security-opt seccomp=unconfined
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [debug, release]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Show toolchain
+        run: swift --version
+      - name: Build (ThreadSanitizer)
+        if: matrix.config == 'debug'
+        env:
+          TSAN_OPTIONS: symbolize=0
+        run: swift build -c debug --sanitize=thread
       # Linux TSan cannot see Synchronization.Mutex's slow-path acquire
       # (swiftlang/swift#94511). Suppress the known false-positive frames
       # until the toolchain carries swiftlang/swift#94425.
       - name: Test (ThreadSanitizer, Linux)
-        if: matrix.config == 'debug' && runner.os == 'Linux'
+        if: matrix.config == 'debug'
         timeout-minutes: 5
         run: |
           swift_bin=$(readlink -f "$(command -v swift)")
           toolchain_bin=$(dirname "$swift_bin")
           export TSAN_OPTIONS="symbolize=1:external_symbolizer_path=$toolchain_bin/llvm-symbolizer:suppressions=$GITHUB_WORKSPACE/.github/tsan-suppressions.txt"
           swift test -c debug --sanitize=thread
-      - name: Test (ThreadSanitizer, macOS)
-        if: matrix.config == 'debug' && runner.os != 'Linux'
-        timeout-minutes: 5
-        env:
-          TSAN_OPTIONS: symbolize=0
-        run: swift test -c debug --sanitize=thread
       - name: Build
         if: matrix.config != 'debug'
         run: swift build -c ${{ matrix.config }}
@@ -163,7 +194,7 @@ jobs:
   draft-release:
     name: draft release (${{ github.ref_name }})
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: [lint, test, windows, apple-platforms]
+    needs: [lint, test, test-linux, windows, apple-platforms]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
