@@ -201,7 +201,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.4.0
       - name: Verify changelog and extract the Unreleased section
         run: |
           uvx --from python-kacl kacl-cli verify
@@ -258,7 +258,7 @@ jobs:
       # The fold itself is kacl-cli (python-kacl): it validates the
       # changelog, refuses an empty [Unreleased], and regenerates the
       # version links per the configuration in .kacl.yml.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.4.0
       - name: Fold Unreleased into ${{ github.event.release.tag_name }}
         env:
           TAG: ${{ github.event.release.tag_name }}
