@@ -153,7 +153,7 @@
         if budget == 0, !supervisor.isClosed {
           // Let timers and other sources run; the source stays signalled
           // so the next callout continues the backlog.
-          wakerSlot.withLock { $0 }?.signal()
+          wakerSlot.withLock { $0?.signal() }
           return
         }
         guard let job = consumer.tryTake() else { break }
@@ -171,14 +171,14 @@
         // pumped a nested loop, and the stop below only stops that nested
         // invocation. The service loop then stops its own invocation and
         // exits.
-        wakerSlot.withLock { $0 }?.signal()
+        wakerSlot.withLock { $0?.signal() }
         CFRunLoopStop(CFRunLoopGetCurrent())
       }
     }
 
     public func enqueue(_ job: consuming ExecutorJob) {
       if producer.enqueue(UnownedJob(job)) {
-        wakerSlot.withLock { $0 }?.wake()
+        wakerSlot.withLock { $0?.wake() }
       }
     }
 
@@ -196,7 +196,7 @@
         "shutdown() must not be called from the executor's bound thread"
       )
       supervisor.close()
-      wakerSlot.withLock { $0 }?.wake()
+      wakerSlot.withLock { $0?.wake() }
       supervisor.waitUntilSealed()
       exitLatch.wait()
     }
@@ -222,7 +222,7 @@
         "shutdown() must not be awaited from a task bound to the executor"
       )
       supervisor.close()
-      wakerSlot.withLock { $0 }?.wake()
+      wakerSlot.withLock { $0?.wake() }
       await exitLatch.waitAsync()
     }
 
@@ -238,28 +238,19 @@
     }
   }
 
-  /// The cross-thread half of the run-loop plumbing: the source installed on
-  /// the bound thread and the loop that waits on it. The mutex carries the
-  /// non-`Sendable` CF handles; `wake()` is safe from any thread, and
-  /// CoreFoundation documents source signalling, wake-up and invalidation as
-  /// thread-safe.
-  private final class RunLoopWaker: Sendable {
-    /// The payload is immutable and only carries the two CF handles. The
-    /// mutex serializes every access, and CoreFoundation documents the
-    /// operations used here (source signalling, wake-up and invalidation)
-    /// as thread-safe. The conformance is the boundary assertion the
-    /// compiler requires for the thread's borrowed run-loop singleton.
-    private struct WakeTarget: @unchecked Sendable {
-      let runLoop: CFRunLoop
-      let source: CFRunLoopSource
-    }
+  /// The cross-thread half of the run-loop plumbing: the bound thread's run
+  /// loop and the source installed into it. The object is immutable; its
+  /// only cross-thread operations are CoreFoundation's documented
+  /// thread-safe source signal and wake-up. The unchecked conformance is the
+  /// single assertion for the two non-`Sendable` handles; the executor's
+  /// slot orders publication and exit.
+  private final class RunLoopWaker: @unchecked Sendable {
+    let runLoop: CFRunLoop
+    let source: CFRunLoopSource
 
-    /// The target; nil after the loop exited, so later wakes are no-ops.
-    private let state: Mutex<WakeTarget?>
-
-    /// Creates the source, adds it to the bound run loop and initializes the
-    /// mutex with the payload. Must run on the bound thread, before the
-    /// executor publishes its readiness.
+    /// Creates the source, adds it to the bound run loop and captures both
+    /// handles. Must run on the bound thread, before the executor publishes
+    /// its readiness.
     init(info: UnsafeMutableRawPointer) {
       let runLoop = CFRunLoopGetCurrent()!
       var context = CFRunLoopSourceContext(
@@ -284,36 +275,26 @@
         preconditionFailure("CFRunLoopSourceCreate failed")
       }
       CFRunLoopAddSource(runLoop, source, defaultRunLoopMode())
-      state = Mutex<WakeTarget?>(
-        WakeTarget(runLoop: runLoop, source: source)
-      )
+      self.runLoop = runLoop
+      self.source = source
     }
 
-    /// Marks the source ready and wakes the loop. Safe from any thread.
+    /// Marks the source ready and wakes the loop. Safe from any thread;
+    /// CoreFoundation documents both calls as thread-safe.
     func wake() {
-      let target = state.withLock { $0 }
-      guard let target else { return }
-      CFRunLoopSourceSignal(target.source)
-      CFRunLoopWakeUp(target.runLoop)
+      CFRunLoopSourceSignal(source)
+      CFRunLoopWakeUp(runLoop)
     }
 
     /// Marks the source ready without waking the loop. Called on the bound
     /// thread, inside the source callback.
     func signal() {
-      let target = state.withLock { $0 }
-      guard let target else { return }
-      CFRunLoopSourceSignal(target.source)
+      CFRunLoopSourceSignal(source)
     }
 
-    /// Detaches and invalidates the source after the loop exited. Later
-    /// `wake()` calls do nothing.
+    /// Invalidates the source after the run loop stopped. Called after the
+    /// executor cleared its slot, so no other thread can reach this waker.
     func invalidate() {
-      let source = state.withLock { state -> CFRunLoopSource? in
-        let source = state?.source
-        state = nil
-        return source
-      }
-      guard let source else { return }
       CFRunLoopSourceInvalidate(source)
     }
   }
