@@ -44,11 +44,15 @@ public protocol ThreadBoundExecutor: ThreadAffinityExecutor {
 /// `perform` blocks registered on the bound thread are serviced between job
 /// batches. Run-loop callbacks are not executor jobs; they run on the bound
 /// thread but outside `runJob`, and must not wait for a job of this
-/// executor.
+/// executor. The thread-based isolation check reports `true` in them; a
+/// callback dispatched while a job pumps a nested run loop is re-entrant
+/// with that job, so it must not assume the job's actor state is quiescent.
 ///
 /// The refinement deliberately does not expose the run loop itself: it is
 /// thread-affine and not `Sendable`. Code that needs it reads
-/// `RunLoop.current` on the bound thread, for example inside a job.
+/// `RunLoop.current` from synchronous code on the bound thread — the
+/// accessor is marked `noasync`, so inside a job put it in a synchronous
+/// helper.
 ///
 /// A `MigratingThreadExecutor` does not conform: a migration may switch to a
 /// bound executor without a run loop, so the capability is not stable across

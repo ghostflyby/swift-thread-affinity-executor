@@ -67,9 +67,12 @@ public enum MigrationError: Error, Sendable, Equatable {
 /// order (the barrier is a job), keep running the jobs they accepted, and
 /// have an `enqueue` that returns promptly. Direct submissions call it with
 /// the routing lock held, so those calls must not call back into this
-/// executor. Their jobs must not re-enter the bound executor's own loop: a
-/// nested run loop on the bound thread would run the barrier while an
-/// earlier job is still live, and the ordering above would not hold.
+/// executor. Their jobs must not re-enter the bound executor's job
+/// execution: a nested run loop on the bound thread that dispatches queued
+/// jobs would run the barrier while an earlier job is still live, and the
+/// ordering above would not hold. A conformance may pump a nested run loop
+/// as long as it refuses to execute jobs from it, as
+/// `RunLoopThreadExecutor` does.
 ///
 /// **When a bound executor stops.** `Executor` cannot refuse a job, and
 /// nothing reports this. An old bound executor that stops servicing before

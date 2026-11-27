@@ -67,9 +67,27 @@
     await executor.shutdown()
   }
 
+  // MARK: - Isolation checks
+
+  /// Off the bound thread the check is negative.
+  @Test func runLoopIsolationCheckIsNegativeOffBoundThread() {
+    let executor = RunLoopThreadExecutor(name: "tae-runloop-negative")
+    #expect(executor.isIsolatingCurrentContext() == false)
+    executor.shutdown()
+  }
+
+  /// On the bound thread the check is positive and thread-based.
+  @Test func runLoopIsolationCheckIsPositiveOnBoundThread() async {
+    let executor = RunLoopThreadExecutor(name: "tae-runloop-positive")
+    let positive = await withTaskExecutorPreference(executor) {
+      executor.isIsolatingCurrentContext()
+    }
+    #expect(positive == true)
+    await executor.shutdown()
+  }
+
   /// Concurrent submitters, exactly-once execution, no data race in shared
-  /// state, all on a single OS thread. Exercises the per-turn budget and the
-  /// source re-signal under a sustained backlog.
+  /// state, all on a single OS thread.
   @Test func runLoopJobExecutionIsExactlyOnceUnderConcurrency() async {
     let executor = RunLoopThreadExecutor(name: "tae-runloop-serial")
     let counter = ThreadSafeCounter()
@@ -161,20 +179,80 @@
     await executor.shutdown()
   }
 
+  /// The per-turn budget lets a due run-loop timer fire before a large
+  /// backlog drains.
+  @Test func runLoopBudgetLetsDueTimerFireBeforeBacklogDrains() async {
+    let executor = RunLoopThreadExecutor(name: "tae-runloop-budget")
+    let counter = ThreadSafeCounter()
+    let threadsSeen = TestBox<Set<ThreadID>>([])
+    let blockerStarted = DispatchSemaphore(value: 0)
+    let gate = DispatchSemaphore(value: 0)
+    let timerFired = DispatchSemaphore(value: 0)
+    let firedAt = TestBox<Int?>(nil)
+
+    let blocker = Task {
+      await withTaskExecutorPreference(executor) {
+        let timer = Timer(fire: Date(), interval: 0, repeats: false) { _ in
+          firedAt.set(counter.value)
+          timerFired.signal()
+        }
+        addTimer(timer)
+        blockerStarted.signal()
+        blockingWait(gate)
+      }
+    }
+
+    await waitForSignal(blockerStarted, timeout: 2, "blocker did not start")
+
+    var jobs: [Task<Void, Never>] = []
+    for _ in 0..<200 {
+      jobs.append(
+        Task {
+          await withTaskExecutorPreference(executor) {
+            counter.increment(recording: threadsSeen)
+          }
+        }
+      )
+    }
+
+    let queued = await waitForPendingJobs(executor, atLeast: 200, timeout: 2)
+    #expect(queued)
+    gate.signal()
+    await blocker.value
+    for job in jobs {
+      await job.value
+    }
+
+    await waitForSignal(timerFired, timeout: 2, "timer did not fire")
+    let at = firedAt.get()
+    #expect(at != nil)
+    if let at {
+      #expect(at > 0)
+      #expect(at < 200)
+    }
+    #expect(counter.value == 200)
+    await executor.shutdown()
+  }
+
   // MARK: - Nested run loop
 
   /// A job that pumps a nested run loop does not re-enter job execution:
-  /// the source callback refuses while the outer drain is live.
+  /// the source callback refuses while the outer drain is live. The queued
+  /// job runs once the pumping job returns.
   @Test func runLoopNestedLoopDoesNotReenterJobs() async {
     let executor = RunLoopThreadExecutor(name: "tae-runloop-nested")
     let nestedStarted = DispatchSemaphore(value: 0)
     let nestedCompleted = TestBox(false)
+    let releaseNested = TestBox(false)
     let secondRan = TestBox(false)
 
     let first = Task {
       await withTaskExecutorPreference(executor) {
         nestedStarted.signal()
-        pumpRunLoop(for: 0.3)
+        let deadline = Date(timeIntervalSinceNow: 2)
+        while !releaseNested.get() && Date() < deadline {
+          pumpRunLoop(for: 0.01)
+        }
         nestedCompleted.set(true)
       }
     }
@@ -187,16 +265,63 @@
       }
     }
 
-    // The second job is queued while the first job pumps a nested loop; the
-    // nested source callback must not run it.
-    try? await Task.sleep(for: .milliseconds(50))
-    #expect(secondRan.get() == false)
+    // Wait until the second job is actually queued while the first job is
+    // still pumping. Without the guard, the nested source callback would
+    // take it; with it, the job stays pending until the first job returns.
+    let queued = await waitForPendingJobs(executor, atLeast: 1, timeout: 2)
+    #expect(queued)
+    if queued {
+      try? await Task.sleep(for: .milliseconds(20))
+      #expect(secondRan.get() == false)
+      #expect(nestedCompleted.get() == false)
+    }
+    releaseNested.set(true)
 
     await first.value
     await second.value
     #expect(nestedCompleted.get())
     #expect(secondRan.get())
     await executor.shutdown()
+  }
+
+  /// Shutdown exits even when a run-loop callback is pumping a nested run
+  /// loop: the closed drain re-signals the source so the enclosing
+  /// invocation observes the close.
+  @Test func runLoopShutdownExitsWhenCallbackPumpsNestedLoop() async {
+    let executor = RunLoopThreadExecutor(
+      name: "tae-runloop-callback-nested")
+    let callbackStarted = DispatchSemaphore(value: 0)
+    let callbackFinished = DispatchSemaphore(value: 0)
+
+    _ = await withTaskExecutorPreference(executor) {
+      let timer = Timer(timeInterval: 0.01, repeats: false) { _ in
+        callbackStarted.signal()
+        pumpRunLoop(for: 0.3)
+        callbackFinished.signal()
+      }
+      addTimer(timer)
+    }
+
+    await waitForSignal(callbackStarted, timeout: 2, "callback did not start")
+
+    let shutdownReturned = DispatchSemaphore(value: 0)
+    let shutdown = Task {
+      await executor.shutdown()
+      shutdownReturned.signal()
+    }
+
+    let returned = await waitForSignal(
+      shutdownReturned, timeout: 3, "shutdown did not return")
+    if !returned {
+      // Unstick the worker so the test can finish; the assertion below
+      // records the failure.
+      await executor.shutdown()
+    }
+    await shutdown.value
+    await waitForSignal(
+      callbackFinished, timeout: 2, "callback did not finish")
+    #expect(returned)
+    #expect(executor.hasFinished)
   }
 
   // MARK: - Shutdown drain
@@ -256,6 +381,20 @@
 
     // After the exit the wait resolves immediately.
     await executor.shutdown()
+  }
+
+  /// Waits until at least `count` jobs are queued but not yet taken.
+  private func waitForPendingJobs(
+    _ executor: RunLoopThreadExecutor,
+    atLeast count: Int,
+    timeout: TimeInterval
+  ) async -> Bool {
+    let deadline = Date(timeIntervalSinceNow: timeout)
+    while Date() < deadline {
+      if executor.pendingJobCount >= count { return true }
+      try? await Task.sleep(for: .milliseconds(2))
+    }
+    return executor.pendingJobCount >= count
   }
 
   /// Adds a timer to the bound thread's run loop. Synchronous on purpose:

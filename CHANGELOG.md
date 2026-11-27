@@ -16,7 +16,9 @@ and this project adheres to
   so an idle executor reacts immediately. Timers and other run-loop sources
   registered on the bound thread run between job batches. A per-turn budget
   keeps a sustained backlog from starving them, and a nested run loop in a
-  job never re-enters job execution. Requires CoreFoundation and Dispatch.
+  job never re-enters job execution. Shutdown re-signals the source so an
+  enclosing invocation still observes the close when a callback pumped a
+  nested run loop. Requires CoreFoundation and Dispatch.
 - `RunLoopServicingExecutor`: a capability refinement of
   `ThreadBoundExecutor` for executors whose bound thread services a run
   loop. `RunLoopThreadExecutor` conforms; `DedicatedThreadExecutor` and

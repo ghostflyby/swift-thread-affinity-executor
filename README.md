@@ -68,14 +68,19 @@ loop is serviced in the default mode.
 import Foundation
 import ThreadAffinityExecutor
 
-let executor = RunLoopThreadExecutor(name: "run-loop-worker")
-
-await withTaskExecutorPreference(executor) {
-    // On the bound thread: the same run loop the executor services.
+// `RunLoop.current` is synchronous-only; schedule from a sync helper.
+func scheduleHeartbeat() {
     let timer = Timer(timeInterval: 0.1, repeats: true) { _ in
         // Runs on the bound thread, between jobs.
     }
     RunLoop.current.add(timer, forMode: .default)
+}
+
+let executor = RunLoopThreadExecutor(name: "run-loop-worker")
+
+await withTaskExecutorPreference(executor) {
+    // On the bound thread: the same run loop the executor services.
+    scheduleHeartbeat()
 }
 
 // after quiescence:
@@ -84,8 +89,11 @@ await executor.shutdown()
 
 A job must not block waiting for work that only the bound run loop can
 deliver; it may pump a nested run loop, but that nested loop never re-enters
-job execution. The thread is not the main thread, so main-run-loop APIs are
-unaffected.
+job execution. Run-loop callbacks are not jobs: the isolation check is
+thread-based and reports `true` in them, and a callback dispatched while a job
+pumps a nested loop is re-entrant with that job; callbacks must not assume
+executor-bound actor state is quiescent. The thread is not the main thread,
+so main-run-loop APIs are unaffected.
 
 `RunLoopServicingExecutor` is the capability refinement: generic code that
 requires a run loop takes `any RunLoopServicingExecutor`, while plain thread

@@ -39,6 +39,13 @@
   ///   running while the job runs. It may pump a nested run loop, but must
   ///   not then wait for another job of this executor — nested job execution
   ///   is refused.
+  /// - Run-loop callbacks are not jobs. `isIsolatingCurrentContext()` is
+  ///   thread-based, so it reports `true` in them; a callback dispatched
+  ///   while a job pumps a nested run loop is re-entrant with that job.
+  ///   Callbacks must not assume executor-bound actor state is quiescent or
+  ///   use `assumeIsolated` on it. A callback's own nested run loop can
+  ///   execute queued jobs, because no job is live there; a job's nested run
+  ///   loop cannot.
   /// - The thread is not the main thread: `DispatchQueue.main`,
   ///   `RunLoop.main` and main-thread-only APIs are unaffected.
   ///
@@ -145,7 +152,12 @@
       }
 
       if supervisor.isClosed {
-        // The empty observation above sealed the queue.
+        // The empty observation above sealed the queue. Signal again so an
+        // enclosing invocation still observes the source: a run-loop
+        // callback may have pumped a nested loop, and the stop below only
+        // stops that nested invocation. The service loop then stops its own
+        // invocation and exits.
+        waker.signal()
         CFRunLoopStop(CFRunLoopGetCurrent())
       }
     }
@@ -204,6 +216,11 @@
     /// and is exiting. Internal; tests and diagnostics.
     var hasFinished: Bool {
       supervisor.isSealed
+    }
+
+    /// Number of queued jobs not yet taken. Internal; tests and diagnostics.
+    var pendingJobCount: Int {
+      supervisor.count
     }
   }
 
