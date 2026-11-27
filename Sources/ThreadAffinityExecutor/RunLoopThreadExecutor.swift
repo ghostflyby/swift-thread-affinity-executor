@@ -51,7 +51,9 @@
   /// - A callback that pumps a nested run loop delays exit until its pump
   ///   returns; the worker cannot leave while the callback is on the stack.
   ///   After the queue closes, every closed drain re-signals the source so
-  ///   the enclosing invocation stops as soon as it regains control.
+  ///   the enclosing invocation stops as soon as it regains control; a
+  ///   callback that keeps pumping therefore spins through immediate returns
+  ///   until it returns. This delays exit, never strands it.
   /// - The thread is not the main thread: `DispatchQueue.main`,
   ///   `RunLoop.main` and main-thread-only APIs are unaffected.
   ///
@@ -235,6 +237,11 @@
     /// Number of queued jobs not yet taken. Internal; tests and diagnostics.
     var pendingJobCount: Int {
       supervisor.count
+    }
+
+    /// Whether the queue is closed. Internal; tests and diagnostics.
+    var isClosed: Bool {
+      supervisor.isClosed
     }
   }
 

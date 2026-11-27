@@ -303,15 +303,14 @@
       name: "tae-runloop-callback-nested")
     let callbackStarted = DispatchSemaphore(value: 0)
     let callbackFinished = DispatchSemaphore(value: 0)
-    let releasePump = TestBox(false)
 
     _ = await withTaskExecutorPreference(executor) {
       let timer = Timer(timeInterval: 0.01, repeats: false) { _ in
         callbackStarted.signal()
-        // Loop through several nested invocations so the shutdown can land
-        // in any of them, then hold one final invocation open.
+        // Pump until shutdown closes the queue, so the close necessarily
+        // lands inside a nested invocation; then hold one final invocation.
         let deadline = Date(timeIntervalSinceNow: runLoopTestPumpDeadline)
-        while !releasePump.get() && Date() < deadline {
+        while !executor.isClosed && Date() < deadline {
           pumpRunLoop(for: 0.01)
         }
         pumpRunLoop(for: 0.2)
@@ -327,11 +326,6 @@
       await executor.shutdown()
       shutdownReturned.signal()
     }
-
-    // Let the close and wake land while the callback loops through nested
-    // invocations, then let it finish.
-    try? await Task.sleep(for: .milliseconds(50))
-    releasePump.set(true)
 
     let returned = await waitForSignal(
       shutdownReturned, timeout: runLoopTestWaitTimeout, "shutdown did not return")
