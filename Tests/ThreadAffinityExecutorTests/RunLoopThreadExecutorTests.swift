@@ -9,6 +9,11 @@
 
   @testable import ThreadAffinityExecutor
 
+  /// The Linux runners can take ten-plus seconds to start a blocked job under
+  /// the full parallel suite; keep failure detection generous.
+  private let runLoopTestWaitTimeout: TimeInterval = 30
+  private let runLoopTestPumpDeadline: TimeInterval = 60
+
   // MARK: - Startup / shutdown
 
   @Test func runLoopInitPublishesRunningExecutor() {
@@ -128,7 +133,7 @@
       addTimer(timer)
     }
 
-    await waitForSignal(fired, timeout: 2, "timer did not fire")
+    await waitForSignal(fired, timeout: runLoopTestWaitTimeout, "timer did not fire")
     #expect(timerThread.get() == executor.threadID)
     await executor.shutdown()
   }
@@ -152,8 +157,8 @@
       addTimer(timer)
     }
 
-    await waitForSignal(timerFired, timeout: 2, "timer did not fire")
-    await waitForSignal(jobRan, timeout: 2, "timer-submitted job did not run")
+    await waitForSignal(timerFired, timeout: runLoopTestWaitTimeout, "timer did not fire")
+    await waitForSignal(jobRan, timeout: runLoopTestWaitTimeout, "timer-submitted job did not run")
     await executor.shutdown()
   }
 
@@ -167,7 +172,7 @@
     _ = await withTaskExecutorPreference(executor) {
       firstDone.signal()
     }
-    await waitForSignal(firstDone, timeout: 2, "first job did not run")
+    await waitForSignal(firstDone, timeout: runLoopTestWaitTimeout, "first job did not run")
 
     // Let the worker re-enter the run loop and sleep.
     try? await Task.sleep(for: .milliseconds(20))
@@ -175,7 +180,7 @@
     _ = await withTaskExecutorPreference(executor) {
       secondDone.signal()
     }
-    await waitForSignal(secondDone, timeout: 2, "queued job did not wake")
+    await waitForSignal(secondDone, timeout: runLoopTestWaitTimeout, "queued job did not wake")
     await executor.shutdown()
   }
 
@@ -202,7 +207,7 @@
       }
     }
 
-    await waitForSignal(blockerStarted, timeout: 2, "blocker did not start")
+    await waitForSignal(blockerStarted, timeout: runLoopTestWaitTimeout, "blocker did not start")
 
     var jobs: [Task<Void, Never>] = []
     for _ in 0..<200 {
@@ -215,7 +220,7 @@
       )
     }
 
-    let queued = await waitForPendingJobs(executor, atLeast: 200, timeout: 2)
+    let queued = await waitForPendingJobs(executor, atLeast: 200, timeout: runLoopTestWaitTimeout)
     gate.signal()
     await blocker.value
     for job in jobs {
@@ -224,7 +229,7 @@
 
     #expect(queued, "the 200-job backlog did not queue")
     if queued {
-      await waitForSignal(timerFired, timeout: 2, "timer did not fire")
+      await waitForSignal(timerFired, timeout: runLoopTestWaitTimeout, "timer did not fire")
       let at = firedAt.get()
       #expect(at != nil)
       if let at {
@@ -255,7 +260,7 @@
         // The outer deadline is a safety net only; the test releases the
         // pump well before it. Keeping it longer than the enqueue-wait
         // timeout avoids coupling the two deadlines.
-        let deadline = Date(timeIntervalSinceNow: 5)
+        let deadline = Date(timeIntervalSinceNow: runLoopTestPumpDeadline)
         while !releaseNested.get() && Date() < deadline {
           pumpRunLoop(for: 0.01)
         }
@@ -263,7 +268,7 @@
       }
     }
 
-    await waitForSignal(nestedStarted, timeout: 2, "nested loop did not start")
+    await waitForSignal(nestedStarted, timeout: runLoopTestWaitTimeout, "nested loop did not start")
 
     let second = Task {
       await withTaskExecutorPreference(executor) {
@@ -274,7 +279,7 @@
     // Wait until the second job is actually queued while the first job is
     // still pumping. Without the guard, the nested source callback would
     // take it; with it, the job stays pending until the first job returns.
-    let queued = await waitForPendingJobs(executor, atLeast: 1, timeout: 2)
+    let queued = await waitForPendingJobs(executor, atLeast: 1, timeout: runLoopTestWaitTimeout)
     #expect(queued)
     if queued {
       try? await Task.sleep(for: .milliseconds(20))
@@ -305,7 +310,7 @@
         callbackStarted.signal()
         // Loop through several nested invocations so the shutdown can land
         // in any of them, then hold one final invocation open.
-        let deadline = Date(timeIntervalSinceNow: 2)
+        let deadline = Date(timeIntervalSinceNow: runLoopTestPumpDeadline)
         while !releasePump.get() && Date() < deadline {
           pumpRunLoop(for: 0.01)
         }
@@ -315,7 +320,7 @@
       addTimer(timer)
     }
 
-    await waitForSignal(callbackStarted, timeout: 2, "callback did not start")
+    await waitForSignal(callbackStarted, timeout: runLoopTestWaitTimeout, "callback did not start")
 
     let shutdownReturned = DispatchSemaphore(value: 0)
     let shutdown = Task {
@@ -329,7 +334,7 @@
     releasePump.set(true)
 
     let returned = await waitForSignal(
-      shutdownReturned, timeout: 3, "shutdown did not return")
+      shutdownReturned, timeout: runLoopTestWaitTimeout, "shutdown did not return")
     if !returned {
       // Unstick the worker so the test can finish; the assertion below
       // records the failure.
@@ -337,7 +342,7 @@
     }
     await shutdown.value
     await waitForSignal(
-      callbackFinished, timeout: 2, "callback did not finish")
+      callbackFinished, timeout: runLoopTestWaitTimeout, "callback did not finish")
     #expect(returned)
     #expect(executor.hasFinished)
   }
@@ -383,7 +388,7 @@
       }
     }
 
-    await waitForSignal(jobStarted, timeout: 2, "job did not start")
+    await waitForSignal(jobStarted, timeout: runLoopTestWaitTimeout, "job did not start")
     let returned = TestBox(false)
     let shutdown = Task {
       await executor.shutdown()
