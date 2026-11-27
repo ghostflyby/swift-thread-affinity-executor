@@ -216,21 +216,24 @@
     }
 
     let queued = await waitForPendingJobs(executor, atLeast: 200, timeout: 2)
-    #expect(queued)
     gate.signal()
     await blocker.value
     for job in jobs {
       await job.value
     }
 
-    await waitForSignal(timerFired, timeout: 2, "timer did not fire")
-    let at = firedAt.get()
-    #expect(at != nil)
-    if let at {
-      #expect(at > 0)
-      #expect(at < 200)
+    #expect(queued, "the 200-job backlog did not queue")
+    if queued {
+      await waitForSignal(timerFired, timeout: 2, "timer did not fire")
+      let at = firedAt.get()
+      #expect(at != nil)
+      if let at {
+        #expect(at > 0)
+        #expect(at < 200)
+      }
     }
     #expect(counter.value == 200)
+    #expect(threadsSeen.get() == [executor.threadID])
     await executor.shutdown()
   }
 
@@ -249,7 +252,10 @@
     let first = Task {
       await withTaskExecutorPreference(executor) {
         nestedStarted.signal()
-        let deadline = Date(timeIntervalSinceNow: 2)
+        // The outer deadline is a safety net only; the test releases the
+        // pump well before it. Keeping it longer than the enqueue-wait
+        // timeout avoids coupling the two deadlines.
+        let deadline = Date(timeIntervalSinceNow: 5)
         while !releaseNested.get() && Date() < deadline {
           pumpRunLoop(for: 0.01)
         }
@@ -284,19 +290,26 @@
     await executor.shutdown()
   }
 
-  /// Shutdown exits even when a run-loop callback is pumping a nested run
-  /// loop: the closed drain re-signals the source so the enclosing
-  /// invocation observes the close.
+  /// Shutdown exits even when a run-loop callback is looping through nested
+  /// run loop invocations: every closed drain re-signals the source so an
+  /// enclosing invocation observes the close.
   @Test func runLoopShutdownExitsWhenCallbackPumpsNestedLoop() async {
     let executor = RunLoopThreadExecutor(
       name: "tae-runloop-callback-nested")
     let callbackStarted = DispatchSemaphore(value: 0)
     let callbackFinished = DispatchSemaphore(value: 0)
+    let releasePump = TestBox(false)
 
     _ = await withTaskExecutorPreference(executor) {
       let timer = Timer(timeInterval: 0.01, repeats: false) { _ in
         callbackStarted.signal()
-        pumpRunLoop(for: 0.3)
+        // Loop through several nested invocations so the shutdown can land
+        // in any of them, then hold one final invocation open.
+        let deadline = Date(timeIntervalSinceNow: 2)
+        while !releasePump.get() && Date() < deadline {
+          pumpRunLoop(for: 0.01)
+        }
+        pumpRunLoop(for: 0.2)
         callbackFinished.signal()
       }
       addTimer(timer)
@@ -309,6 +322,11 @@
       await executor.shutdown()
       shutdownReturned.signal()
     }
+
+    // Let the close and wake land while the callback loops through nested
+    // invocations, then let it finish.
+    try? await Task.sleep(for: .milliseconds(50))
+    releasePump.set(true)
 
     let returned = await waitForSignal(
       shutdownReturned, timeout: 3, "shutdown did not return")

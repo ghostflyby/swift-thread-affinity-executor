@@ -43,9 +43,14 @@
   ///   thread-based, so it reports `true` in them; a callback dispatched
   ///   while a job pumps a nested run loop is re-entrant with that job.
   ///   Callbacks must not assume executor-bound actor state is quiescent or
-  ///   use `assumeIsolated` on it. A callback's own nested run loop can
-  ///   execute queued jobs, because no job is live there; a job's nested run
-  ///   loop cannot.
+  ///   use `assumeIsolated` on it. A nested run loop executes queued jobs
+  ///   only when no drain is on the stack: a callback dispatched from the
+  ///   idle loop can run jobs from its own nested loop, while a job's nested
+  ///   loop — or a callback dispatched underneath it — cannot.
+  /// - A callback that pumps a nested run loop delays exit until its pump
+  ///   returns; the worker cannot leave while the callback is on the stack.
+  ///   After the queue closes, every closed drain re-signals the source so
+  ///   the enclosing invocation stops as soon as it regains control.
   /// - The thread is not the main thread: `DispatchQueue.main`,
   ///   `RunLoop.main` and main-thread-only APIs are unaffected.
   ///
@@ -152,11 +157,13 @@
       }
 
       if supervisor.isClosed {
-        // The empty observation above sealed the queue. Signal again so an
-        // enclosing invocation still observes the source: a run-loop
-        // callback may have pumped a nested loop, and the stop below only
-        // stops that nested invocation. The service loop then stops its own
-        // invocation and exits.
+        // The empty observation above sealed the queue if it saw the close;
+        // otherwise close() landed after the observation and the enclosing
+        // invocation's next drain seals it. Signal again so an enclosing
+        // invocation still observes the source: a run-loop callback may have
+        // pumped a nested loop, and the stop below only stops that nested
+        // invocation. The service loop then stops its own invocation and
+        // exits.
         waker.signal()
         CFRunLoopStop(CFRunLoopGetCurrent())
       }
