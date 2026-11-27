@@ -1,6 +1,6 @@
 # ThreadAffinityExecutor
 
-Thread-affinity executors for Swift Concurrency: at any moment, every job accepted by one of these executors runs on one known OS thread. A `ThreadBoundExecutor` keeps that thread for its whole lifetime; a `MigratingThreadExecutor` changes it only through an explicit migration. The bound thread is created by the library.
+Thread-affinity executors for Swift Concurrency: at any moment, every job accepted by one of these executors runs on one known OS thread. A `ThreadBoundExecutor` keeps that thread for its whole lifetime; a `MigratingThreadExecutor` changes it only through an explicit migration. The bound thread is created by the library, except for `MainThreadExecutor`, which borrows the process's main thread.
 
 ## Scope
 
@@ -14,6 +14,7 @@ Thread-affinity executors for Swift Concurrency: at any moment, every job accept
 | `RunLoopServicingExecutor` | Refines `ThreadBoundExecutor`: the bound thread also services a run loop | ✅ |
 | `DedicatedThreadExecutor` | Dedicated OS thread | ✅ |
 | `RunLoopThreadExecutor` | Dedicated OS thread whose idle wait is a `CFRunLoop`; jobs arrive through a run-loop source (CoreFoundation + Dispatch platforms) | ✅ |
+| `MainThreadExecutor` | Main-thread executor protocol: `mainThreadExecutor` for main-thread affinity, `mainRunLoopExecutor` for run-loop servicing (requires the main run loop to be running) | ✅ |
 | `MigratingThreadExecutor` | One executor over a sequence of `ThreadBoundExecutor`s, exchanged through explicit migrations; bound executors are borrowed | 🔶 prototype |
 | Shutdown scopes / task tracking | Full quiescence machinery | ⏳ quiescence contract only |
 
@@ -97,10 +98,38 @@ so main-run-loop APIs are unaffected.
 
 `RunLoopServicingExecutor` is the capability refinement: generic code that
 requires a run loop takes `any RunLoopServicingExecutor`, while plain thread
-affinity stays `any ThreadBoundExecutor`. `DedicatedThreadExecutor` and
-`MigratingThreadExecutor` conform only to `ThreadBoundExecutor` — a migration
-may switch to a bound executor without a run loop. The type requires
-CoreFoundation and Dispatch; it is absent where those cannot be imported.
+affinity stays `any ThreadBoundExecutor`. `RunLoopThreadExecutor` conforms;
+`mainRunLoopExecutor` returns a `RunLoopServicingExecutor` view after
+requiring the main run loop to be running. `DedicatedThreadExecutor` and
+`MigratingThreadExecutor` conform only to `ThreadBoundExecutor` — a
+migration may switch to a bound executor without a run loop.
+`RunLoopThreadExecutor` requires CoreFoundation and Dispatch;
+`MainThreadExecutor` requires CoreFoundation and Dispatch.
+
+### Main thread
+
+`MainThreadExecutor` is the main-thread executor protocol.
+`mainThreadExecutor` is the main-thread-bound view: jobs run on
+`DispatchQueue.main` when the host drains it. The first access from a
+non-main thread hops to the main queue to capture the thread ID and blocks
+until that queue runs; warm it from the main thread before starting
+background work.
+
+`mainRunLoopExecutor` returns the run-loop-servicing view. It requires the
+main run loop to be running and traps otherwise; the main run loop is owned
+by the host and is never started or stopped here. Requires CoreFoundation
+and Dispatch.
+
+A job must not pump the main run loop: a nested main loop drains the main
+queue and can run another job reentrantly.
+
+```swift
+let executor = mainThreadExecutor
+
+await withTaskExecutorPreference(executor) {
+    // Main thread.
+}
+```
 
 ### Migrating between bound executors
 
