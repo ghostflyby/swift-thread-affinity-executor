@@ -11,7 +11,9 @@ Thread-affinity executors for Swift Concurrency: at any moment, every job accept
 | `ThreadID` | Cross-platform OS thread ID value type | ✅ |
 | `ThreadAffinityExecutor` | Common protocol of the executor families: jobs run on one known OS thread at any moment (`currentThreadID`) | ✅ |
 | `ThreadBoundExecutor` | `ThreadAffinityExecutor` bound to one OS thread for its whole lifetime (`SerialExecutor + TaskExecutor`) | ✅ |
+| `RunLoopServicingExecutor` | Refines `ThreadBoundExecutor`: the bound thread also services a run loop | ✅ |
 | `DedicatedThreadExecutor` | Dedicated OS thread | ✅ |
+| `RunLoopThreadExecutor` | Dedicated OS thread whose idle wait is a `CFRunLoop`; jobs arrive through a run-loop source (CoreFoundation + Dispatch platforms) | ✅ |
 | `MigratingThreadExecutor` | One executor over a sequence of `ThreadBoundExecutor`s, exchanged through explicit migrations; bound executors are borrowed | 🔶 prototype |
 | Shutdown scopes / task tracking | Full quiescence machinery | ⏳ quiescence contract only |
 
@@ -51,6 +53,54 @@ print(await counter.next()) // runs on the dedicated thread
 await executor.shutdown() // suspends until the queue drained and sealed; idempotent; never await on the bound thread
 // the synchronous shutdown() blocks instead, for synchronous contexts
 ```
+
+### Dedicated thread with a run loop
+
+`RunLoopThreadExecutor` is `DedicatedThreadExecutor` with the wait replaced
+by the thread's `CFRunLoop`: the worker sits in `CFRunLoopRun`, and jobs reach
+it through a version-0 run-loop source. `enqueue` first puts the job in the
+queue, then signals the source and wakes the loop, so an idle executor reacts
+immediately instead of on a poll interval. Timers, run-loop sources and
+`perform` blocks registered on the bound thread run between job batches; the
+loop is serviced in the default mode.
+
+```swift
+import Foundation
+import ThreadAffinityExecutor
+
+// `RunLoop.current` is synchronous-only; schedule from a sync helper.
+func scheduleHeartbeat() {
+    let timer = Timer(timeInterval: 0.1, repeats: true) { _ in
+        // Runs on the bound thread, between jobs.
+    }
+    RunLoop.current.add(timer, forMode: .default)
+}
+
+let executor = RunLoopThreadExecutor(name: "run-loop-worker")
+
+await withTaskExecutorPreference(executor) {
+    // On the bound thread: the same run loop the executor services.
+    scheduleHeartbeat()
+}
+
+// after quiescence:
+await executor.shutdown()
+```
+
+A job must not block waiting for work that only the bound run loop can
+deliver; it may pump a nested run loop, but that nested loop never re-enters
+job execution. Run-loop callbacks are not jobs: the isolation check is
+thread-based and reports `true` in them, and a callback dispatched while a job
+pumps a nested loop is re-entrant with that job; callbacks must not assume
+executor-bound actor state is quiescent. The thread is not the main thread,
+so main-run-loop APIs are unaffected.
+
+`RunLoopServicingExecutor` is the capability refinement: generic code that
+requires a run loop takes `any RunLoopServicingExecutor`, while plain thread
+affinity stays `any ThreadBoundExecutor`. `DedicatedThreadExecutor` and
+`MigratingThreadExecutor` conform only to `ThreadBoundExecutor` — a migration
+may switch to a bound executor without a run loop. The type requires
+CoreFoundation and Dispatch; it is absent where those cannot be imported.
 
 ### Migrating between bound executors
 

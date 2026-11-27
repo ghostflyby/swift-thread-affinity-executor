@@ -36,6 +36,30 @@ public protocol ThreadBoundExecutor: ThreadAffinityExecutor {
   var threadID: ThreadID { get }
 }
 
+/// A `ThreadBoundExecutor` whose bound thread also services a run loop.
+///
+/// The affinity contract is unchanged: jobs run serially, in acceptance
+/// order, on one OS thread. The capability adds that the thread's run loop
+/// is driven when the thread is idle, so timers, run-loop sources and
+/// `perform` blocks registered on the bound thread are serviced between job
+/// batches. Run-loop callbacks are not executor jobs; they run on the bound
+/// thread but outside `runJob`, and must not wait for a job of this
+/// executor. The thread-based isolation check reports `true` in them; a
+/// callback dispatched while a job pumps a nested run loop is re-entrant
+/// with that job, so it must not assume the job's actor state is quiescent.
+///
+/// The refinement deliberately does not expose the run loop itself: it is
+/// thread-affine and not `Sendable`. Code that needs it reads
+/// `RunLoop.current` from synchronous code on the bound thread — the
+/// accessor is marked `noasync`, so inside a job put it in a synchronous
+/// helper.
+///
+/// A `MigratingThreadExecutor` does not conform: a migration may switch to a
+/// bound executor without a run loop, so the capability is not stable across
+/// migrations. Require this protocol only from executors whose binding is
+/// fixed.
+public protocol RunLoopServicingExecutor: ThreadBoundExecutor {}
+
 extension ThreadBoundExecutor {
   /// The binding never changes: the current thread is the bound thread.
   public var currentThreadID: ThreadID {

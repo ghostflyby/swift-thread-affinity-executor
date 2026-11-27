@@ -8,6 +8,22 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- `RunLoopThreadExecutor`: a `ThreadBoundExecutor` whose dedicated thread
+  waits in a `CFRunLoop` instead of a blocking queue take. Jobs are drained
+  through a run-loop source; `enqueue` signals the source and wakes the loop,
+  so an idle executor reacts immediately. Timers and other run-loop sources
+  registered on the bound thread run between job batches. A per-turn budget
+  keeps a sustained backlog from starving them, and a nested run loop in a
+  job never re-enters job execution. Shutdown re-signals the source so an
+  enclosing invocation still observes the close when a callback pumped a
+  nested run loop. Requires CoreFoundation and Dispatch.
+- `RunLoopServicingExecutor`: a capability refinement of
+  `ThreadBoundExecutor` for executors whose bound thread services a run
+  loop. `RunLoopThreadExecutor` conforms; `DedicatedThreadExecutor` and
+  `MigratingThreadExecutor` do not.
+
 ## [0.2.0] - 2026-11-26
 
 ### Added

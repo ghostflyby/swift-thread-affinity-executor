@@ -31,23 +31,14 @@ func waitForSignal(
   timeout: TimeInterval,
   _ message: Comment = "timed out waiting for a signal"
 ) async -> Bool {
-  // Whoever exchanges first owns the continuation. A compare-exchange rather
-  // than a mutex keeps the race lock-free: Linux TSan cannot see the slow path
-  // of `Synchronization.Mutex`, and this guard is contended by design.
-  let settled = Atomic<Bool>(false)
-  let claim: @Sendable () -> Bool = { [settled] in
-    settled.compareExchange(
-      expected: false, desired: true, ordering: .acquiringAndReleasing
-    ).exchanged
-  }
+  // The wait and the timeout run in one block: a late-scheduled waiter then
+  // delays the result instead of losing a claim to the timeout and reporting
+  // a signal that arrived in time as a timeout.
   let didSignal = await withCheckedContinuation {
     (continuation: CheckedContinuation<Bool, Never>) in
     DispatchQueue.global().async {
-      semaphore.wait()
-      if claim() { continuation.resume(returning: true) }
-    }
-    DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-      if claim() { continuation.resume(returning: false) }
+      let result = semaphore.wait(timeout: .now() + timeout)
+      continuation.resume(returning: result == .success)
     }
   }
   if !didSignal {
