@@ -246,12 +246,12 @@
   }
 
   /// The cross-thread half of the run-loop plumbing: the bound thread's run
-  /// loop and the source installed into it. The object is immutable; its
-  /// only cross-thread operations are CoreFoundation's documented
-  /// thread-safe source signal and wake-up. The unchecked conformance is the
-  /// single assertion for the two non-`Sendable` handles; the executor's
-  /// slot orders publication and exit.
-  private final class RunLoopWaker: @unchecked Sendable {
+  /// loop and the source installed into it. The value is immutable; its only
+  /// cross-thread operations are CoreFoundation's documented thread-safe
+  /// source signal and wake-up. The unchecked conformance is the single
+  /// assertion for the two non-`Sendable` handles; the executor's slot orders
+  /// publication and exit.
+  private struct RunLoopWaker: @unchecked Sendable {
     let runLoop: CFRunLoop
     let source: CFRunLoopSource
 
