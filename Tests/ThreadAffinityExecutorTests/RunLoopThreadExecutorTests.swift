@@ -242,6 +242,51 @@
     await executor.shutdown()
   }
 
+  // MARK: - Wake coalescing
+
+  /// A burst submitted while the worker is busy does not request one wake
+  /// per job: the running drain holds the pending flag, so the whole burst
+  /// coalesces behind the wake that started it.
+  @Test func runLoopEnqueueWakesCoalesceWhileDraining() async {
+    let executor = RunLoopThreadExecutor(name: "tae-runloop-wake-coalescing")
+    let gateStarted = DispatchSemaphore(value: 0)
+    let gate = DispatchSemaphore(value: 0)
+    let blocker = Task {
+      await withTaskExecutorPreference(executor) {
+        gateStarted.signal()
+        blockingWait(gate)
+      }
+    }
+
+    await waitForSignal(
+      gateStarted, timeout: runLoopTestWaitTimeout, "blocker did not start")
+    // The blocker's enqueue is the single wake that started this drain.
+    #expect(executor.wakeRequestCount == 1)
+
+    let submitted = 200
+    var jobs: [Task<Void, Never>] = []
+    for _ in 0..<submitted {
+      jobs.append(
+        Task {
+          await withTaskExecutorPreference(executor) {}
+        })
+    }
+
+    let queued = await waitForPendingJobs(
+      executor, atLeast: submitted, timeout: runLoopTestWaitTimeout)
+    #expect(queued)
+    if queued {
+      #expect(executor.wakeRequestCount == 1)
+    }
+
+    gate.signal()
+    await blocker.value
+    for job in jobs {
+      await job.value
+    }
+    await executor.shutdown()
+  }
+
   // MARK: - Nested run loop
 
   /// A job that pumps a nested run loop does not re-enter job execution:

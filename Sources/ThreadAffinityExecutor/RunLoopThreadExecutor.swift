@@ -16,8 +16,10 @@
   ///
   /// The thread waits in `CFRunLoopRun`; jobs travel through the blocking
   /// queue as a backlog and are executed by a version-0 run-loop source.
-  /// `enqueue` signals that source and wakes the loop, so an idle executor
-  /// picks work up immediately rather than on a poll interval. While the
+  /// The first `enqueue` after an idle drain signals that source and wakes
+  /// the loop, so an idle executor picks work up immediately rather than on
+  /// a poll interval; submissions that arrive while a wake is outstanding
+  /// coalesce into it instead of waking the loop once per job. While the
   /// queue is idle the thread is inside the run loop: timers, sources and
   /// `perform` blocks registered on the bound thread run there, between job
   /// batches.
@@ -77,6 +79,13 @@
     /// The waker published by the bound thread once its run loop and source
     /// exist; nil before startup and after exit.
     private let wakerSlot = Mutex<RunLoopWaker?>(nil)
+    /// Cross-thread coalescing: `true` while a wake is outstanding or a drain
+    /// is running, so only the first enqueuer in that window wakes the loop.
+    /// The drain clears it only after observing an empty queue and rechecks
+    /// for jobs that raced with the clear.
+    private let wakePending = Atomic<Bool>(false)
+    /// Number of wake-ups requested by `enqueue`. Internal; diagnostics.
+    private let wakeRequests = Atomic<Int>(0)
     /// Retained for ownership; a running `Thread` also retains itself.
     private var worker: Thread? = nil
     /// Bound-thread only: a nested run loop must not re-enter job execution.
@@ -154,11 +163,27 @@
       while true {
         if budget == 0, !supervisor.isClosed {
           // Let timers and other sources run; the source stays signalled
-          // so the next callout continues the backlog.
+          // so the next callout continues the backlog. `wakePending` stays
+          // set, so producers keep coalescing behind the signalled source.
           wakerSlot.withLock { $0?.signal() }
           return
         }
-        guard let job = consumer.tryTake() else { break }
+        guard let job = consumer.tryTake() else {
+          // Empty observation: acknowledge the outstanding wake before
+          // returning, so the next enqueue wakes the loop again.
+          _ = wakePending.exchange(false, ordering: .acquiringAndReleasing)
+          // An enqueuer that raced with the acknowledgement saw `true` and
+          // skipped its wake. Take one and keep draining with the flag
+          // re-armed; clearing and rechecking in this order makes the
+          // coalescing lossless.
+          guard let raced = consumer.tryTake() else { break }
+          wakePending.store(true, ordering: .releasing)
+          budget -= 1
+          withPerWorkAutoreleasePool {
+            runJob(raced)
+          }
+          continue
+        }
         budget -= 1
         withPerWorkAutoreleasePool {
           runJob(job)
@@ -180,7 +205,12 @@
 
     public func enqueue(_ job: consuming ExecutorJob) {
       if producer.enqueue(UnownedJob(job)) {
-        wakerSlot.withLock { $0?.wake() }
+        // Only the enqueuer that flips the pending flag wakes the loop;
+        // everyone in the same wake window just adds to the backlog.
+        if !wakePending.exchange(true, ordering: .acquiringAndReleasing) {
+          wakeRequests.wrappingAdd(1, ordering: .sequentiallyConsistent)
+          wakerSlot.withLock { $0?.wake() }
+        }
       }
     }
 
@@ -237,6 +267,12 @@
     /// Number of queued jobs not yet taken. Internal; tests and diagnostics.
     var pendingJobCount: Int {
       supervisor.count
+    }
+
+    /// Number of wake-ups requested by `enqueue`. Internal; tests and
+    /// diagnostics.
+    var wakeRequestCount: Int {
+      wakeRequests.load(ordering: .sequentiallyConsistent)
     }
 
     /// Whether the queue is closed. Internal; tests and diagnostics.

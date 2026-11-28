@@ -31,6 +31,14 @@ and this project adheres to
   conforming view; `DedicatedThreadExecutor` and `MigratingThreadExecutor`
   do not.
 
+### Changed
+
+- `RunLoopThreadExecutor` coalesces wake-ups: only the first enqueue after
+  an idle drain signals the run-loop source and wakes the loop; submissions
+  that arrive while a wake is outstanding share it. The drain clears the
+  pending flag only after observing an empty queue and rechecks for jobs that
+  raced with the clear, so batching does not lose a submission.
+
 ## [0.2.0] - 2026-11-26
 
 ### Added
