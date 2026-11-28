@@ -8,6 +8,14 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- `RunLoopThreadExecutor` coalesces wake-ups: only the first enqueue after
+  an idle drain signals the run-loop source and wakes the loop; submissions
+  that arrive while a wake is outstanding share it. The drain acknowledges
+  the wake only after observing an empty queue and rechecks for jobs that
+  raced with the acknowledgement, so batching does not lose a submission.
+
 ## [0.3.0] - 2026-11-28
 
 ### Added
