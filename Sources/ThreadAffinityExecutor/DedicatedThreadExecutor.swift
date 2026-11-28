@@ -26,7 +26,7 @@ import Foundation
 ///   external producer may still submit jobs. Remaining queued jobs are
 ///   executed before the thread exits; a job enqueued from the
 ///   `shutdown()` request onward is dropped.
-public final class DedicatedThreadExecutor: ThreadBoundExecutor, @unchecked Sendable {
+public final class DedicatedThreadExecutor: ThreadBoundExecutor, Sendable {
   /// The worker thread's ID, published during the startup handshake.
   public var threadID: ThreadID {
     handshake.threadID
@@ -37,8 +37,6 @@ public final class DedicatedThreadExecutor: ThreadBoundExecutor, @unchecked Send
   private let supervisor: QueueSupervisor<UnownedJob>
   private let handshake = StartupHandshake()
   private let exitLatch = ExitLatch()
-  /// Retained for ownership; a running `Thread` also retains itself.
-  private var worker: Thread? = nil
 
   /// Creates the worker thread and waits for the startup handshake.
   ///
@@ -60,7 +58,6 @@ public final class DedicatedThreadExecutor: ThreadBoundExecutor, @unchecked Send
     if let name {
       worker.name = name
     }
-    self.worker = worker
     worker.start()
     // Ready ⇒ the worker published its ThreadID.
     handshake.awaitReady()
