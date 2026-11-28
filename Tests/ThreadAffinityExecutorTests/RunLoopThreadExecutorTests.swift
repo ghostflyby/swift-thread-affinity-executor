@@ -316,16 +316,24 @@
       "drain did not reach the acknowledge point")
     #expect(executor.wakeRequestCount == 1)
 
+    let enqueueDecided = DispatchSemaphore(value: 0)
+    let firstDecision = TestBox(true)
+    executor.afterWakeDecisionHook = {
+      guard firstDecision.get() else { return }
+      firstDecision.set(false)
+      enqueueDecided.signal()
+    }
+
     let second = Task {
       await withTaskExecutorPreference(executor) {
         secondRan.signal()
       }
     }
-    let queued = await waitForPendingJobs(
-      executor, atLeast: 1, timeout: runLoopTestWaitTimeout)
-    #expect(queued)
-    // The worker is parked before the acknowledge, so the second enqueue saw
-    // the pending flag and did not wake the loop.
+    await waitForSignal(
+      enqueueDecided, timeout: runLoopTestWaitTimeout,
+      "second enqueue did not update the pending flag")
+    // The exchange ran while the worker was parked before the acknowledge,
+    // so the second enqueue saw the pending flag and skipped its wake.
     #expect(executor.wakeRequestCount == 1)
 
     releaseHook.signal()

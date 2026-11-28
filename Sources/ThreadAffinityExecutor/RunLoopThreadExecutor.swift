@@ -94,6 +94,10 @@
     /// before it acknowledges the wake. Set before the first submission; the
     /// test target does not mutate it concurrently.
     var beforeWakeAcknowledgeHook: (@Sendable () -> Void)?
+    /// Test-only suspension point after an enqueue updated the pending flag
+    /// and before it returns. Set before the probe submission; the test
+    /// target does not mutate it while an enqueue is in flight.
+    var afterWakeDecisionHook: (@Sendable () -> Void)?
 
     /// Jobs executed per source callout before yielding to the run loop, so
     /// a sustained backlog cannot starve timers and other sources.
@@ -216,6 +220,7 @@
           wakeRequests.wrappingAdd(1, ordering: .sequentiallyConsistent)
           wakerSlot.withLock { $0?.wake() }
         }
+        afterWakeDecisionHook?()
       }
     }
 
