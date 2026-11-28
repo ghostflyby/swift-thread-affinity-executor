@@ -242,6 +242,111 @@
     await executor.shutdown()
   }
 
+  // MARK: - Wake coalescing
+
+  /// A burst submitted while the worker is busy does not request one wake
+  /// per job: the running drain holds the pending flag, so the whole burst
+  /// coalesces behind the wake that started it.
+  @Test func runLoopEnqueueWakesCoalesceWhileDraining() async {
+    let executor = RunLoopThreadExecutor(name: "tae-runloop-wake-coalescing")
+    let gateStarted = DispatchSemaphore(value: 0)
+    let gate = DispatchSemaphore(value: 0)
+    let blocker = Task {
+      await withTaskExecutorPreference(executor) {
+        gateStarted.signal()
+        blockingWait(gate)
+      }
+    }
+
+    await waitForSignal(
+      gateStarted, timeout: runLoopTestWaitTimeout, "blocker did not start")
+    // The blocker's enqueue is the single wake that started this drain.
+    #expect(executor.wakeRequestCount == 1)
+
+    let submitted = 200
+    var jobs: [Task<Void, Never>] = []
+    for _ in 0..<submitted {
+      jobs.append(
+        Task {
+          await withTaskExecutorPreference(executor) {}
+        })
+    }
+
+    let queued = await waitForPendingJobs(
+      executor, atLeast: submitted, timeout: runLoopTestWaitTimeout)
+    #expect(queued)
+    if queued {
+      #expect(executor.wakeRequestCount == 1)
+    }
+
+    gate.signal()
+    await blocker.value
+    for job in jobs {
+      await job.value
+    }
+    await executor.shutdown()
+  }
+
+  /// A job enqueued after the drain observes an empty queue but before it
+  /// acknowledges the wake saw `true` and skipped its wake; the recheck must
+  /// still run it.
+  @Test func runLoopRecheckRunsJobRacingWithWakeAcknowledge() async {
+    let executor = RunLoopThreadExecutor(name: "tae-runloop-wake-recheck")
+    let firstRan = DispatchSemaphore(value: 0)
+    let secondRan = DispatchSemaphore(value: 0)
+    let hookEntered = DispatchSemaphore(value: 0)
+    let releaseHook = DispatchSemaphore(value: 0)
+    let firstHook = TestBox(true)
+    executor.beforeWakeAcknowledgeHook = {
+      guard firstHook.get() else { return }
+      firstHook.set(false)
+      hookEntered.signal()
+      releaseHook.wait()
+    }
+
+    let first = Task {
+      await withTaskExecutorPreference(executor) {
+        firstRan.signal()
+      }
+    }
+    await waitForSignal(
+      firstRan, timeout: runLoopTestWaitTimeout, "first job did not run")
+    await waitForSignal(
+      hookEntered, timeout: runLoopTestWaitTimeout,
+      "drain did not reach the acknowledge point")
+    #expect(executor.wakeRequestCount == 1)
+
+    let enqueueDecided = DispatchSemaphore(value: 0)
+    let firstDecision = TestBox(true)
+    executor.afterWakeDecisionHook = {
+      guard firstDecision.get() else { return }
+      firstDecision.set(false)
+      enqueueDecided.signal()
+    }
+
+    let second = Task {
+      await withTaskExecutorPreference(executor) {
+        secondRan.signal()
+      }
+    }
+    await waitForSignal(
+      enqueueDecided, timeout: runLoopTestWaitTimeout,
+      "second enqueue did not update the pending flag")
+    // The exchange ran while the worker was parked before the acknowledge,
+    // so the second enqueue saw the pending flag and skipped its wake.
+    #expect(executor.wakeRequestCount == 1)
+
+    releaseHook.signal()
+    await waitForSignal(
+      secondRan, timeout: runLoopTestWaitTimeout,
+      "recheck did not run the raced job")
+    await first.value
+    // Shutdown drains the raced job even if the recheck regressed, so the
+    // test reports a failure instead of hanging on `second.value`.
+    await executor.shutdown()
+    await second.value
+  }
+
   // MARK: - Nested run loop
 
   /// A job that pumps a nested run loop does not re-enter job execution:

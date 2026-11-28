@@ -60,10 +60,11 @@ await executor.shutdown() // suspends until the queue drained and sealed; idempo
 `RunLoopThreadExecutor` is `DedicatedThreadExecutor` with the wait replaced
 by the thread's `CFRunLoop`: the worker sits in `CFRunLoopRun`, and jobs reach
 it through a version-0 run-loop source. `enqueue` first puts the job in the
-queue, then signals the source and wakes the loop, so an idle executor reacts
-immediately instead of on a poll interval. Timers, run-loop sources and
-`perform` blocks registered on the bound thread run between job batches; the
-loop is serviced in the default mode.
+queue; the first submission after an idle drain signals the source and wakes
+the loop, so an idle executor reacts immediately instead of on a poll
+interval, while a burst coalesces into that one wake. Timers, run-loop
+sources and `perform` blocks registered on the bound thread run between job
+batches; the loop is serviced in the default mode.
 
 ```swift
 import Foundation
