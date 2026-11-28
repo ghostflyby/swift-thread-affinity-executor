@@ -287,6 +287,58 @@
     await executor.shutdown()
   }
 
+  /// A job enqueued after the drain observes an empty queue but before it
+  /// acknowledges the wake saw `true` and skipped its wake; the recheck must
+  /// still run it.
+  @Test func runLoopRecheckRunsJobRacingWithWakeAcknowledge() async {
+    let executor = RunLoopThreadExecutor(name: "tae-runloop-wake-recheck")
+    let firstRan = DispatchSemaphore(value: 0)
+    let secondRan = DispatchSemaphore(value: 0)
+    let hookEntered = DispatchSemaphore(value: 0)
+    let releaseHook = DispatchSemaphore(value: 0)
+    let firstHook = TestBox(true)
+    executor.beforeWakeAcknowledgeHook = {
+      guard firstHook.get() else { return }
+      firstHook.set(false)
+      hookEntered.signal()
+      releaseHook.wait()
+    }
+
+    let first = Task {
+      await withTaskExecutorPreference(executor) {
+        firstRan.signal()
+      }
+    }
+    await waitForSignal(
+      firstRan, timeout: runLoopTestWaitTimeout, "first job did not run")
+    await waitForSignal(
+      hookEntered, timeout: runLoopTestWaitTimeout,
+      "drain did not reach the acknowledge point")
+    #expect(executor.wakeRequestCount == 1)
+
+    let second = Task {
+      await withTaskExecutorPreference(executor) {
+        secondRan.signal()
+      }
+    }
+    let queued = await waitForPendingJobs(
+      executor, atLeast: 1, timeout: runLoopTestWaitTimeout)
+    #expect(queued)
+    // The worker is parked before the acknowledge, so the second enqueue saw
+    // the pending flag and did not wake the loop.
+    #expect(executor.wakeRequestCount == 1)
+
+    releaseHook.signal()
+    await waitForSignal(
+      secondRan, timeout: runLoopTestWaitTimeout,
+      "recheck did not run the raced job")
+    await first.value
+    // Shutdown drains the raced job even if the recheck regressed, so the
+    // test reports a failure instead of hanging on `second.value`.
+    await executor.shutdown()
+    await second.value
+  }
+
   // MARK: - Nested run loop
 
   /// A job that pumps a nested run loop does not re-enter job execution:

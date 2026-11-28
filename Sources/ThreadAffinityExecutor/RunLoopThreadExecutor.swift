@@ -90,6 +90,10 @@
     private var worker: Thread? = nil
     /// Bound-thread only: a nested run loop must not re-enter job execution.
     private var isDraining = false
+    /// Test-only suspension point after the drain observes an empty queue and
+    /// before it acknowledges the wake. Set before the first submission; the
+    /// test target does not mutate it concurrently.
+    var beforeWakeAcknowledgeHook: (@Sendable () -> Void)?
 
     /// Jobs executed per source callout before yielding to the run loop, so
     /// a sustained backlog cannot starve timers and other sources.
@@ -169,6 +173,7 @@
           return
         }
         guard let job = consumer.tryTake() else {
+          beforeWakeAcknowledgeHook?()
           // Empty observation: acknowledge the outstanding wake before
           // returning, so the next enqueue wakes the loop again.
           _ = wakePending.exchange(false, ordering: .acquiringAndReleasing)
